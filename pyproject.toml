@@ -1,0 +1,34 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "decoygen"
+dynamic = ["version"]
+readme = "README.md"
+description = "Generator for non-protein decoy cryo-EM densities"
+requires-python = ">=3.10"
+dependencies = ["numpy", "scipy", "torch", "gemmi", "mrcfile", "matplotlib"]
+
+[project.optional-dependencies]
+test = ["pytest"]
+
+[project.scripts]
+decoygen = "decoygen.cli:main"
+
+[tool.setuptools]
+packages = ["decoygen"]
+
+[tool.setuptools.dynamic]
+version = {attr = "decoygen.__version__"}
+
+[tool.setuptools.package-data]
+decoygen = ["data/*.json"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = ["slow: full-size runs (submit via slurm)"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
