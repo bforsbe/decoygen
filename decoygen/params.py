@@ -19,9 +19,10 @@ class DecoyParams:
     resolution: float = 3.5             # target resolution d (A)
 
     # Envelope
-    mass_kda: float = 150.0             # sets mask volume V = 1.21 A^3/Da * M
+    mass_kda: float = 100.0             # sets mask volume V = 1.21 A^3/Da * M
     roughness_D: float = 2.25           # surface fractal dimension (roughness exponent), via calibration
-    alpha: float | None = None          # GRF spectral exponent; overrides roughness_D when given
+    alpha: float | None = None          # GRF spectral exponent; default 9 - 2*roughness_D
+    roughness_amplitude: float | None = None  # fine/coarse GRF amplitude; default from the calibration table
     compactness: float = 8.0            # mean-curvature-flow time (A^2), MBO scheme
     n_domains: int = 1
     elongation: float = 1.0             # >= 1, volume-preserving stretch along a random axis
@@ -63,6 +64,8 @@ class DecoyParams:
             raise ValueError("roughness_D outside the supported range 2.0-2.6")
         if self.alpha is not None and not 2.0 < self.alpha < 6.0:
             raise ValueError("alpha outside the supported range (2, 6)")
+        if self.roughness_amplitude is not None and self.roughness_amplitude < 0:
+            raise ValueError("roughness_amplitude must be >= 0")
         if self.compactness < 0:
             raise ValueError("compactness must be >= 0")
         if self.n_domains < 1:
@@ -85,7 +88,9 @@ class DecoyParams:
             raise ValueError(f"noise_model must be one of {NOISE_MODELS}")
         if self.bfactor < 0:
             raise ValueError("bfactor must be >= 0")
-        extent = 2 * self.equivalent_radius * self.elongation * self.n_domains ** (1 / 3)
+        # Irregular envelopes reach ~1.5-1.9 R from their centre; reject hopeless boxes up front
+        # (make_envelope retries the rest and raises EnvelopeError if none fits).
+        extent = 2 * 1.6 * self.equivalent_radius * self.elongation * self.n_domains ** (1 / 3)
         if extent + 2 * self.edge_clearance > self.box * self.apix:
             raise ValueError(
                 f"box ({self.box * self.apix:.0f} A) too small for mass {self.mass_kda} kDa "

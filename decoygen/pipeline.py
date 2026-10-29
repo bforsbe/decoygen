@@ -30,10 +30,6 @@ class Decoy:
     curves: dict = field(default_factory=dict)
 
 
-def resolve_alpha(params: DecoyParams) -> tuple[float, str]:
-    if params.alpha is not None:
-        return params.alpha, "user"
-    return roughness.alpha_for_D(params.roughness_D)
 
 
 def generate(params: DecoyParams, device: str = "cpu", with_diagnostics: bool = True) -> Decoy:
@@ -47,9 +43,10 @@ def generate(params: DecoyParams, device: str = "cpu", with_diagnostics: bool = 
         timings[name] = time.perf_counter() - t0 - sum(timings.values())
 
     grid = Grid(params.box, params.apix, device)
-    alpha, alpha_source = resolve_alpha(params)
+    rough = roughness.roughness_parameters(params.roughness_D, params.alpha, params.roughness_amplitude)
     mask, attempt = make_envelope(
-        grid, volume=params.volume, alpha=alpha, compactness=params.compactness,
+        grid, volume=params.volume, alpha=rough["alpha"], roughness_amplitude=rough["roughness_amplitude"],
+        compactness=params.compactness,
         n_domains=params.n_domains, elongation=params.elongation, bias=params.envelope_bias,
         clearance=params.edge_clearance, seed=params.seed)
     m = torch.as_tensor(mask, device=grid.device)
@@ -95,7 +92,7 @@ def generate(params: DecoyParams, device: str = "cpu", with_diagnostics: bool = 
         tick("diagnostics")
 
     info = {
-        "alpha": alpha, "alpha_source": alpha_source, "envelope_attempt": attempt,
+        **rough, "envelope_attempt": attempt,
         "n_atoms": n_atoms, **turing_info, **noise_info,
         "gs_spectral_error_history": gs_history,
         "timings_s": timings, "device": str(grid.device),

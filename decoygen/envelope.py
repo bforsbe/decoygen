@@ -1,9 +1,15 @@
 """Random envelope (mask): rough Gaussian random field + confinement, MBO smoothing.
 
-1. GRF with power ~ k^-alpha (level-set surface dimension D ~ (9 - alpha)/2).
+1. GRF with power ~ k^-alpha, split at k ~ 1/R into a coarse part (global shape,
+   unit variance) and a fine part (surface roughness, variance amplitude^2).
+   alpha sets the Hurst exponent H = (alpha - 3)/2 of the fine roughness, but a
+   self-affine surface only shows D = 3 - H below the crossover length where
+   its slopes reach ~1; the amplitude moves that crossover, so both are needed
+   to set the Richardson D between the resolution and R (see docs/METHODS.md).
 2. A quadratic confinement term (one ellipsoid per domain) keeps a single compact
    object; it is smooth, so it changes global shape but not fine-scale roughness.
-3. Threshold so the largest (periodic) connected component has volume V.
+3. Threshold so the largest (periodic) connected component, with enclosed
+   cavities filled, has volume V.
 4. MBO mean-curvature flow at constant volume for compactness.
 5. Centre periodically and check edge clearance.
 """
@@ -24,11 +30,15 @@ class EnvelopeError(RuntimeError):
     pass
 
 
-def gaussian_random_field(grid: Grid, alpha: float, gen: torch.Generator) -> torch.Tensor:
-    white = rng.randn(grid.shape, gen, grid.device)
+def split_random_field(grid: Grid, alpha: float, s_split: float,
+                       gen: torch.Generator) -> tuple[torch.Tensor, torch.Tensor]:
+    """Power-law GRF (power ~ s^-alpha) split into unit-variance coarse and fine parts at s_split (1/A)."""
+    white = grid.rfft(rng.randn(grid.shape, gen, grid.device))
     amp = torch.where(grid.s > 0, grid.s.clamp(min=1e-12) ** (-alpha / 2), torch.zeros_like(grid.s))
-    field = grid.irfft(grid.rfft(white) * amp)
-    return field / field.std()
+    low = 1.0 / (1.0 + (grid.s / s_split) ** 4)
+    coarse = grid.irfft(white * amp * low)
+    fine = grid.irfft(white * amp * (1 - low))
+    return coarse / coarse.std(), fine / fine.std()
 
 
 def _random_unit_vector(gen: torch.Generator) -> np.ndarray:
@@ -96,6 +106,11 @@ def largest_component(mask: np.ndarray) -> np.ndarray:
     return lab == sizes.argmax()
 
 
+def solid_object(mask: np.ndarray) -> np.ndarray:
+    """Largest periodic component, centred, with enclosed cavities filled."""
+    return ndimage.binary_fill_holes(periodic_centre(largest_component(mask)))
+
+
 def periodic_centre(mask: np.ndarray) -> np.ndarray:
     """Roll so the circular mean of the object lies at the box centre."""
     n = mask.shape[0]
@@ -124,7 +139,7 @@ def threshold_to_volume(field: np.ndarray, n_vox: int, tol: float = 0.005, max_i
     best = None
     for _ in range(max_iter):
         rank = (lo + hi) // 2
-        comp = largest_component(field > flat[rank])
+        comp = solid_object(field > flat[rank])
         v = int(comp.sum())
         if best is None or abs(v - n_vox) < abs(best[1] - n_vox):
             best = (comp, v)
@@ -146,19 +161,21 @@ def mbo_flow(grid: Grid, mask: np.ndarray, time: float, n_vox: int) -> np.ndarra
         phi = grid.gaussian_filter(torch.from_numpy(mask.astype(np.float32)).to(grid.device), sigma)
         phi = phi.cpu().numpy()
         t = np.partition(phi.ravel(), phi.size - n_vox)[phi.size - n_vox]
-        mask = largest_component(phi >= t)
+        mask = solid_object(phi >= t)
     return mask
 
 
-def make_envelope(grid: Grid, *, volume: float, alpha: float, compactness: float,
-                  n_domains: int, elongation: float, bias: float, clearance: float,
-                  seed: int, max_attempts: int = 10) -> tuple[np.ndarray, int]:
+def make_envelope(grid: Grid, *, volume: float, alpha: float, roughness_amplitude: float,
+                  compactness: float, n_domains: int, elongation: float, bias: float,
+                  clearance: float, seed: int, max_attempts: int = 10) -> tuple[np.ndarray, int]:
     """Returns (bool mask, attempt index used)."""
     n_vox = round(volume / grid.apix**3)
     clearance_px = math.ceil(clearance / grid.apix)
+    radius = (3 * volume / (4 * math.pi)) ** (1 / 3)
     for attempt in range(max_attempts):
         gen = rng.stage_generator(seed, "envelope", attempt)
-        field = gaussian_random_field(grid, alpha, gen)
+        coarse, fine = split_random_field(grid, alpha, 1.0 / radius, gen)
+        field = coarse + roughness_amplitude * fine
         field = field - bias * confinement(grid, volume, n_domains, elongation, gen)
         mask = threshold_to_volume(field.cpu().numpy(), n_vox)
         mask = mbo_flow(grid, mask, compactness, n_vox)

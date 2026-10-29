@@ -105,6 +105,7 @@ def cmd_batch(args) -> None:
         row.update(_flat("param.", params.to_dict()))
         row.update(_flat("diag.", decoy.diagnostics))
         row["alpha_used"] = decoy.info["alpha"]
+        row["roughness_amplitude_used"] = decoy.info["roughness_amplitude"]
         rows.append(row)
         print(f"{name}: {decoy.info['timings_s']}", flush=True)
     keys = list(dict.fromkeys(k for r in rows for k in r))
@@ -122,8 +123,8 @@ def cmd_calibrate(args) -> None:
 
     base = params_from_args(args)
     alphas = np.round(np.arange(args.alpha_min, args.alpha_max + 1e-9, args.alpha_step), 3)
-    seeds = range(args.seeds)
-    table = calibrate(base, alphas, seeds, device=args.device or default_device())
+    seeds = list(range(args.seeds))
+    table = calibrate(base, alphas, args.amplitudes, seeds, device=args.device or default_device())
     out = Path(args.out) if args.out else CALIBRATION_FILE
     write_json(out, table)
     print(f"wrote {out}")
@@ -152,12 +153,14 @@ def main(argv=None) -> None:
     add_param_args(p)
     p.set_defaults(func=cmd_batch)
 
-    p = sub.add_parser("calibrate", help="build the alpha -> D lookup table")
-    p.add_argument("--alpha-min", type=float, default=3.2)
+    p = sub.add_parser("calibrate", help="build the (alpha, amplitude) -> D lookup table")
+    p.add_argument("--alpha-min", type=float, default=3.8)
     p.add_argument("--alpha-max", type=float, default=5.0)
     p.add_argument("--alpha-step", type=float, default=0.2)
+    p.add_argument("--amplitudes", type=float, nargs="+",
+                   default=[0.0, 0.1, 0.2, 0.3, 0.45, 0.6, 0.8, 1.0, 1.3, 1.7])
     p.add_argument("--seeds", type=int, default=4)
-    p.add_argument("--out", help="default: packaged decoygen/data/alpha_to_D.json")
+    p.add_argument("--out", help="default: packaged decoygen/data/roughness_calibration.json")
     p.add_argument("--device")
     add_param_args(p)
     p.set_defaults(func=cmd_calibrate)

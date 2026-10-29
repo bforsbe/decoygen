@@ -92,21 +92,42 @@ def test_periodic_label_merges_across_faces():
 
 def test_envelope_volume_clearance_connectivity(grid):
     volume = 25000.0
-    mask, _ = make_envelope(grid, volume=volume, alpha=4.5, compactness=8.0, n_domains=1,
-                            elongation=1.0, bias=1.5, clearance=6.0, seed=3)
+    mask, _ = make_envelope(grid, volume=volume, alpha=4.5, roughness_amplitude=0.6, compactness=8.0,
+                            n_domains=1, elongation=1.0, bias=1.5, clearance=6.0, seed=3)
     assert mask.sum() == pytest.approx(volume, rel=0.02)
     assert not mask[:6].any() and not mask[-6:].any()
     _, sizes = periodic_label(mask)
     assert (sizes > 0).sum() == 1
 
 
-def test_rougher_alpha_gives_higher_D(grid):
+def test_envelope_has_no_cavities(grid):
+    from scipy import ndimage
+
+    mask, _ = make_envelope(grid, volume=15000.0, alpha=4.0, roughness_amplitude=1.5, compactness=0.0,
+                            n_domains=1, elongation=1.0, bias=1.5, clearance=3.0, seed=1)
+    assert np.array_equal(mask, ndimage.binary_fill_holes(mask))
+
+
+def test_larger_roughness_amplitude_gives_higher_D(grid):
     Ds = []
-    for alpha in (3.4, 4.8):
-        mask, _ = make_envelope(grid, volume=25000.0, alpha=alpha, compactness=0.0, n_domains=1,
-                                elongation=1.0, bias=1.5, clearance=4.0, seed=0)
-        Ds.append(roughness.richardson(grid, mask, 1.5, 6.0)["D"])
-    assert Ds[0] > Ds[1]
+    for amp in (0.0, 1.0):
+        mask, _ = make_envelope(grid, volume=15000.0, alpha=4.4, roughness_amplitude=amp, compactness=0.0,
+                                n_domains=1, elongation=1.0, bias=1.5, clearance=3.0, seed=0)
+        Ds.append(roughness.richardson(grid, mask, 1.75, 5.0)["D"])
+    assert Ds[1] > Ds[0] + 0.03
+
+
+def test_amplitude_for_D_inverts_table():
+    cal = {"alpha": [4.0, 5.0], "amplitude": [0.0, 0.5, 1.0],
+           "D_mean": [[2.05, 2.20, 2.40], [2.03, 2.10, 2.20]]}
+    amp, src = roughness.amplitude_for_D(2.30, 4.0, cal)
+    assert src == "calibration" and amp == pytest.approx(0.75)
+    amp, _ = roughness.amplitude_for_D(2.15, 4.5, cal)     # row = [2.04, 2.15, 2.30]
+    assert amp == pytest.approx(0.5)
+    with pytest.warns(UserWarning):
+        roughness.amplitude_for_D(2.6, 4.0, cal)
+    p = roughness.roughness_parameters(2.25, None, None, cal)
+    assert p["alpha"] == pytest.approx(4.5) and p["alpha_source"] == "theory"
 
 
 def test_render_integral_equals_f0(grid):

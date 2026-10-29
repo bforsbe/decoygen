@@ -1,4 +1,4 @@
-"""Surface roughness: Richardson-plot fractal dimension and the alpha -> D calibration.
+"""Surface roughness: Richardson-plot fractal dimension and the (alpha, amplitude) -> D calibration.
 
 Area at scale sigma is the total variation of the Gaussian-blurred indicator,
 A(sigma) = int |grad(G_sigma * chi)| dV, which by the coarea formula averages the
@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import warnings
 from pathlib import Path
 
@@ -17,7 +18,7 @@ import torch
 
 from .fourier import Grid
 
-CALIBRATION_FILE = Path(__file__).parent / "data" / "alpha_to_D.json"
+CALIBRATION_FILE = Path(__file__).parent / "data" / "roughness_calibration.json"
 
 
 def surface_area(grid: Grid, mask: np.ndarray | torch.Tensor, sigma: float) -> float:
@@ -62,24 +63,52 @@ def theoretical_alpha(D: float) -> float:
     return 9.0 - 2.0 * D
 
 
-def load_calibration(path: Path = CALIBRATION_FILE) -> dict | None:
-    if not Path(path).exists():
+def load_calibration(path: Path | None = None) -> dict | None:
+    """Calibration table: `path`, else $DECOYGEN_CALIBRATION, else the packaged file."""
+    path = Path(path or os.environ.get("DECOYGEN_CALIBRATION") or CALIBRATION_FILE)
+    if not path.exists():
         return None
-    return json.loads(Path(path).read_text())
+    return json.loads(path.read_text())
 
 
-def alpha_for_D(D: float, calibration: dict | None = None) -> tuple[float, str]:
-    """Map a target D to the GRF exponent. Returns (alpha, source)."""
+DEFAULT_ROUGHNESS_AMPLITUDE = 0.3
+
+
+def amplitude_for_D(D: float, alpha: float, calibration: dict | None = None) -> tuple[float, str]:
+    """Fine-roughness amplitude giving Richardson D at the given alpha. Returns (amplitude, source).
+
+    The table holds mean measured D on an (alpha x amplitude) grid. Rows are linearly
+    interpolated in alpha, made monotone in amplitude, and inverted.
+    """
     cal = calibration if calibration is not None else load_calibration()
     if cal is None:
-        return theoretical_alpha(D), "theory"
+        return DEFAULT_ROUGHNESS_AMPLITUDE, "uncalibrated"
     alphas = np.array(cal["alpha"])
-    Ds = np.array(cal["D_mean"])
-    order = np.argsort(Ds)
-    Ds, alphas = Ds[order], alphas[order]
-    if not Ds[0] <= D <= Ds[-1]:
-        warnings.warn(f"roughness_D={D} outside calibrated range [{Ds[0]:.3f}, {Ds[-1]:.3f}]; clamping")
-    return float(np.interp(D, Ds, alphas)), "calibration"
+    amps = np.array(cal["amplitude"])
+    Dgrid = np.array(cal["D_mean"])              # shape (len(alphas), len(amps))
+    a = float(np.clip(alpha, alphas[0], alphas[-1]))
+    j = int(np.clip(np.searchsorted(alphas, a) - 1, 0, len(alphas) - 2))
+    w = (a - alphas[j]) / (alphas[j + 1] - alphas[j])
+    row = np.maximum.accumulate((1 - w) * Dgrid[j] + w * Dgrid[j + 1])
+    if not row[0] <= D <= row[-1]:
+        warnings.warn(f"roughness_D={D} outside the calibrated range [{row[0]:.3f}, {row[-1]:.3f}] "
+                      f"at alpha={alpha:.2f}; clamping")
+    # np.interp needs strictly increasing x; drop plateaus
+    keep = np.concatenate([[True], np.diff(row) > 0])
+    return float(np.interp(D, row[keep], amps[keep])), "calibration"
+
+
+def roughness_parameters(D: float, alpha: float | None, amplitude: float | None,
+                         calibration: dict | None = None) -> dict:
+    """Resolve (alpha, amplitude) for a target D; explicit values win."""
+    out = {"alpha": alpha if alpha is not None else theoretical_alpha(D),
+           "alpha_source": "user" if alpha is not None else "theory"}
+    if amplitude is not None:
+        out.update(roughness_amplitude=amplitude, amplitude_source="user")
+    else:
+        amp, src = amplitude_for_D(D, out["alpha"], calibration)
+        out.update(roughness_amplitude=amp, amplitude_source=src)
+    return out
 
 
 def sphericity(volume: float, area: float) -> float:

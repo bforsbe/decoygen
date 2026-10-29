@@ -47,7 +47,8 @@ def summary_figure(decoy, path) -> None:
     a.loglog(r["sigmas"], fit, "k-")
     a.set_xlabel("blur σ (Å)")
     a.set_ylabel("area / equal-volume ball area")
-    a.set_title(f"Richardson D = {dg['richardson_D']:.3f} (α = {decoy.info['alpha']:.2f})")
+    a.set_title(f"Richardson D = {dg['richardson_D']:.3f} "
+                f"(α = {decoy.info['alpha']:.2f}, amp = {decoy.info['roughness_amplitude']:.2f})")
 
     a = ax[1, 3]
     a.plot(s[1:nyq], c["fsc"][1:nyq])

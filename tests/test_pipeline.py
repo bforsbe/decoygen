@@ -11,8 +11,9 @@ from decoygen.fourier import Grid
 from decoygen.io import check_mrc
 from decoygen.pipeline import generate, save
 
-SMALL = {"box": 64, "apix": 1.0, "resolution": 4.0, "mass_kda": 20.0, "edge_clearance": 6.0,
-         "turing_iterations": 80, "gs_iterations": 10, "alpha": 4.4}
+SMALL = {"box": 64, "apix": 1.0, "resolution": 4.0, "mass_kda": 12.0, "edge_clearance": 5.0,
+         "turing_iterations": 80, "gs_iterations": 10, "alpha": 4.4,
+         "roughness_amplitude": 0.5}
 
 
 @pytest.fixture(scope="module")
