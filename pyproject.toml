@@ -1,11 +1,13 @@
 [build-system]
-requires = ["setuptools>=64"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "decoygen"
 dynamic = ["version"]
 readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
 description = "Generator for non-protein decoy cryo-EM densities"
 requires-python = ">=3.10"
 dependencies = ["numpy", "scipy", "torch", "gemmi", "mrcfile", "matplotlib"]

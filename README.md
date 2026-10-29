@@ -36,3 +36,7 @@ seeds, versions and diagnostics.
 ```bash
 pytest -m "not slow"
 ```
+
+## License
+
+MIT, see [LICENSE](LICENSE).
