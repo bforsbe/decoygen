@@ -5,6 +5,7 @@
     polymer   rung 1                -> rung 2  bonded tree with protein bond/angle/contact distances
     thread    rung 2                -> rung 3  one linear chain
     peptide   rung 3                -> rung 4  N-CA-C(=O) repeat, trans planar peptides, L at CA
+    sidechains rung 4               -> rung 5  thinned to protein's residues per mass, real side chains
     mirror    any rung              -> same rung, mirrored (always the last step)
     render    any model             -> noise-free map, two noisy half-maps, their mean, support
 
@@ -21,7 +22,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from . import atoms, io, noise, peptide, polymer, thread
+from . import atoms, io, noise, peptide, polymer, sidechains, thread
 from .constants import MASS_PER_HEAVY_ATOM
 from .envelope import make_envelope
 from .fourier import Grid
@@ -145,6 +146,42 @@ def make_peptide(m: Model, *, steps: int = 3000, keep_atoms: bool = True, seed: 
     out.pos, out.els, out.edges = pos, pep["els"], pep["edges"]
     out.resseq, out.names, out.resnames, out.bfactor = pep["resseq"], pep["names"], pep["resnames"], None
     return out, info
+
+
+def make_sidechains(m: Model, *, fraction: float = 0.2, steps: int = 3000, stages: int = 5, seed: int = 0,
+                    device: str = "cpu", force=False, log=None):
+    """Thin the backbone to a protein's residues per atom in passes, then real side chains."""
+    require(m, 4, "sidechains", force)
+    ref, env = polymer.load_reference(), _envelope(m, device)
+    ch = sidechains.Chain(m.pos, m.els, m.edges, m.resseq, m.names)
+    n_res_in = ch.n_res
+    n_target = round(m.n / (len(sidechains.BACKBONE) + sidechains.MEAN_SIZE))
+    passes = sidechains.thin(ch, n_target, fraction=fraction, steps=steps, stages=stages, envelope=env, ref=ref,
+                             device=device, seed=seed, log=log)
+    rng = np.random.default_rng(seed)
+    sizes = np.array([len(g) for g in ch.group])
+    seq = sidechains.fit_sequence(sizes, m.n - len(sidechains.BACKBONE) * ch.n_res, rng)
+    pep = sidechains.place_sidechains(ch, sidechains.load_library(), seq)
+    r, extra = sidechains.final_restraints(pep, ref, device, seed=seed)
+    x, rinfo = polymer.relax(torch.as_tensor(pep["pos"], dtype=torch.float32, device=device), pep["els"],
+                             pep["edges"], ref, envelope=env, steps=steps, seed=seed, restraints=r, extra=extra,
+                             log=log)
+    rinfo.pop("history")
+    pos = x.cpu().numpy().astype(np.float64)
+    composition = {aa: seq.count(aa) for aa in sorted(set(seq))}
+    info = {"residues_in": n_res_in, "residues_out": len(seq), "atoms_in": m.n, "atoms_out": len(pos),
+            "atoms_per_residue": len(pos) / len(seq), "thinning_passes": passes, "composition": composition,
+            "sequence": "".join(_ONE.get(a, "X") for a in seq), **rinfo, **peptide.report(pep, pos)}
+    out = m.then(5, "sidechains", fraction=fraction, steps=steps, stages=stages, seed=seed,
+                 **({"forced": True} if force else {}))
+    out.pos, out.els, out.edges = pos, pep["els"], pep["edges"]
+    out.resseq, out.names, out.resnames, out.bfactor = pep["resseq"], pep["names"], pep["resnames"], None
+    return out, info
+
+
+_ONE = {"ALA": "A", "ARG": "R", "ASN": "N", "ASP": "D", "CYS": "C", "GLN": "Q", "GLU": "E", "GLY": "G", "HIS": "H",
+        "ILE": "I", "LEU": "L", "LYS": "K", "MET": "M", "PHE": "F", "PRO": "P", "SER": "S", "THR": "T", "TRP": "W",
+        "TYR": "Y", "VAL": "V"}
 
 
 def mirror(m: Model) -> Model:

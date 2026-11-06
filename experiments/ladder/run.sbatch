@@ -16,9 +16,14 @@ ENV=/proj/liu-folab-cryoem-dev/users/x_bjfor/.conda/envs/decoy
 PY="$ENV/bin/python"
 ROOT=runs/ladder
 
-# 1. derived atoms
-[ -f $ROOT/build/polymer_chain_split5_prune4.pdb ] || "$PY" experiments/hallucination/thread.py --split 5 \
-    runs/bookmarks/raw-polymer/polymer_atoms.pdb --fill --prune 4 --relax 3000 --out $ROOT/build
+# 1. derived atoms: the main ladder from the decoygen commands, B6 from the detector branch
+CLI=$ROOT/build/cli
+[ -f $CLI/rung4_peptide_backbone.pdb ] || "$ENV/bin/decoygen" ladder --to 4 --out $CLI --frame-box 144 --seed 0 \
+    > $ROOT/build/cli.log 2>&1 || { echo "decoygen ladder failed ($ROOT/build/cli.log)"; exit 1; }
+[ -f $CLI/rung4_peptide_backbone_mirror.pdb ] || "$ENV/bin/decoygen" mirror $CLI/rung4_peptide_backbone.pdb
+[ -f $CLI/rung5_real_side_chains.pdb ] || "$ENV/bin/decoygen" sidechains $CLI/rung4_peptide_backbone.pdb \
+    > $ROOT/build/cli_rung5.log 2>&1 || { echo "decoygen sidechains failed"; exit 1; }
+[ -f $CLI/rung5_real_side_chains_mirror.pdb ] || "$ENV/bin/decoygen" mirror $CLI/rung5_real_side_chains.pdb
 B5=runs/hallucination/decoy_polymer_soft_cw0.2_lr0.15_p4
 [ -f ${B5}_chain_prune4.pdb ] || "$PY" experiments/hallucination/thread.py ${B5}_atoms.pdb \
     --fill --prune 4 --relax 3000

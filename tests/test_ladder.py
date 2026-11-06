@@ -3,7 +3,7 @@ import pytest
 from scipy import sparse
 from scipy.sparse.csgraph import connected_components
 
-from decoygen import cli, ladder, peptide
+from decoygen import cli, ladder, peptide, sidechains
 from decoygen.model import Model, RungError, read, require, write
 from decoygen.params import DecoyParams
 
@@ -23,6 +23,11 @@ def rungs():
     m3, _ = ladder.thread_chain(m2, relax=300)
     m4, info4 = ladder.make_peptide(m3, steps=2000)
     return m1, m2, m3, m4, info4
+
+
+@pytest.fixture(scope="module")
+def rung5(rungs):
+    return ladder.make_sidechains(rungs[3], steps=900, stages=3)
 
 
 def toy(rung, mirrored=False):
@@ -93,3 +98,27 @@ def test_cli_refuses_the_wrong_rung(rungs, tmp_path, capsys):
         cli.main(["peptide", str(p), "--device", "cpu"])
     assert e.value.code == 2
     assert "run `decoygen thread` first" in capsys.readouterr().err
+
+
+def test_sidechains_thin_to_protein_mass_per_residue_and_keep_the_mass(rungs, rung5):
+    m4 = rungs[3]
+    m5, info = rung5
+    assert m5.rung == 5 and pieces(m5) == 1
+    assert m5.n == m4.n                                               # mass preserved exactly
+    assert 7.3 < info["atoms_per_residue"] < 8.3                     # protein: ~7.8
+    for p in info["thinning_passes"]:                                 # at most 1 in 5 per pass, joins healed
+        assert p["junction_CA_CA_after_max_A"] < 4.2
+    assert info["L_fraction"] == 1.0 and info["omega_trans_fraction_gt150"] > 0.97
+    assert info["steric_violations_gt_0.2A"] == 0
+    assert set(m5.resnames) <= set(sidechains.TOPOLOGY) and len(set(m5.resnames)) > 10
+
+
+def test_library_and_placement_reproduce_real_side_chains():
+    lib = sidechains.load_library()
+    assert set(lib) == set(sidechains.TOPOLOGY) - {"GLY"}
+    n, ca, c = np.array([1.458, 0, 0]), np.zeros(3), np.array([-0.55, 1.42, 0])
+    phe = sidechains.place(lib["PHE"][0], n, ca, c)
+    names = sidechains.TOPOLOGY["PHE"][0]
+    assert abs(np.linalg.norm(phe[names.index("CB")] - ca) - 1.53) < 0.05
+    ring = phe[[names.index(x) for x in ("CG", "CD1", "CD2", "CE1", "CE2", "CZ")]]
+    assert np.linalg.svd(ring - ring.mean(0))[1][-1] < 0.1               # planar ring

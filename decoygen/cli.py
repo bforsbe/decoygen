@@ -1,7 +1,8 @@
 """Command line.
 
 Decoy maps (v0):   decoygen generate | batch | calibrate
-Atom-model ladder: decoygen gas | hardcore | polymer | thread | peptide | mirror | render | info | ladder
+Atom-model ladder: decoygen gas | hardcore | polymer | thread | peptide | sidechains | mirror | render |
+                   info | ladder
                    (each model step makes the next rung of the protein-likeness ladder from the one
                    below and refuses any other input; see decoygen/model.py)
 """
@@ -203,6 +204,14 @@ def cmd_peptide(args) -> None:
     _save(m, args, info)
 
 
+def cmd_sidechains(args) -> None:
+    from .ladder import make_sidechains
+
+    m, info = make_sidechains(_read(args), fraction=args.fraction, steps=args.steps, stages=args.stages,
+                              seed=args.seed, device=args.device or default_device(), force=args.force, log=_log)
+    _save(m, args, info)
+
+
 def cmd_mirror(args) -> None:
     from .ladder import mirror
 
@@ -248,7 +257,8 @@ def cmd_ladder(args) -> None:
     m = m1
     steps = [(2, lambda m: ladder.build_polymer(m, steps=args.steps, **kw)),
              (3, lambda m: ladder.thread_chain(m, relax=args.steps, **kw)),
-             (4, lambda m: ladder.make_peptide(m, steps=args.steps, **kw))]
+             (4, lambda m: ladder.make_peptide(m, steps=args.steps, **kw)),
+             (5, lambda m: ladder.make_sidechains(m, steps=args.steps, **kw))]
     for rung, step in steps:
         if rung > args.to:
             break
@@ -331,6 +341,12 @@ def main(argv=None) -> None:
                    help="add the carbonyl O atoms on top (default: trim side atoms to keep the atom count)")
     p.set_defaults(func=cmd_peptide)
 
+    p = sub.add_parser("sidechains", help="rung 4 -> rung 5: thin to protein residues per mass, real side chains")
+    _model_args(p)
+    p.add_argument("--fraction", type=float, default=0.2, help="max fraction of residues excised per pass")
+    p.add_argument("--stages", type=int, default=5, help="relaxations over which new bonds are switched on")
+    p.set_defaults(func=cmd_sidechains)
+
     p = sub.add_parser("mirror", help="any rung -> its mirror image (last step only)")
     _model_args(p, steps=False)
     p.set_defaults(func=cmd_mirror)
@@ -350,7 +366,7 @@ def main(argv=None) -> None:
     p.set_defaults(func=cmd_info)
 
     p = sub.add_parser("ladder", help="build rungs 0..TO in one directory (gas, hardcore, polymer, ...)")
-    p.add_argument("--to", type=int, default=4, choices=range(1, 5))
+    p.add_argument("--to", type=int, default=5, choices=range(1, 6))
     p.add_argument("--out", required=True)
     p.add_argument("--frame-box", type=float)
     p.add_argument("--steps", type=int, default=3000)

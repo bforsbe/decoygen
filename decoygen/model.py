@@ -40,7 +40,7 @@ RUNGS = {
     8: "protein",
 }
 # the step that makes each rung (rung 0 is made from rung 1: same atoms, overlaps removed)
-MAKES = {0: "hardcore", 1: "gas", 2: "polymer", 3: "thread", 4: "peptide"}
+MAKES = {0: "hardcore", 1: "gas", 2: "polymer", 3: "thread", 4: "peptide", 5: "sidechains"}
 TAG = "REMARK 999 DECOYGEN "
 
 

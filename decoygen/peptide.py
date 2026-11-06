@@ -265,10 +265,27 @@ def build(pos: np.ndarray, els: np.ndarray, edges: np.ndarray, backbone: np.ndar
             **idx, "stats": stats}
 
 
-def restraints(pep: dict, ref: dict, device, seed: int = 0):
+def set_targets(r: polymer.Restraints, table) -> None:
+    """Override bond (1-2) and 1-3 targets: table = [(pairs (k, 2) with i < j, target(s)), ...]."""
+    n_at = r.n
+    for keys, values in ((r.keys12, r.b0_np), (r.keys13, r.a0_np)):
+        where = {int(k): i for i, k in enumerate(keys)}
+        for pr, target in table:
+            target = np.broadcast_to(np.asarray(target, dtype=np.float64), (len(pr),))
+            for k, t in zip(pr[:, 0] * n_at + pr[:, 1], target):
+                if int(k) in where:
+                    values[where[int(k)]] = t
+    r.b0 = torch.as_tensor(r.b0_np, dtype=torch.float32, device=r.b0.device)
+    r.a0 = torch.as_tensor(r.a0_np, dtype=torch.float32, device=r.a0.device)
+
+
+def restraints(pep: dict, ref: dict, device, seed: int = 0, link_weight=None, chiral_weight=None):
     """polymer.Restraints with the peptide's bond and 1-3 targets, plus the extra terms
-    (trans planar peptide, L chirality) as a callable for polymer.relax."""
-    n_at = len(pep["pos"])
+    (trans planar peptide, L chirality) as a callable for polymer.relax.
+
+    link_weight (n_res - 1) and chiral_weight (n_res) scale the extra terms per peptide link
+    and per residue (to switch new ones on gradually); mutable: change them between relaxations.
+    """
     r = polymer.Restraints(pep["els"], pep["edges"], ref, device, seed=seed)
     n, ca, c, o, cb = (pep[k] for k in ("n", "ca", "c", "o", "cb"))
     nxt = np.arange(len(n) - 1)
@@ -292,31 +309,26 @@ def restraints(pep: dict, ref: dict, device, seed: int = 0):
               (pairs(n[has_cb], cb[has_cb]), third("N", "CA", "CB")),
               (pairs(c[has_cb], cb[has_cb]), third("C", "CA", "CB"))]
 
-    def override(keys, values, table):
-        where = {int(k): i for i, k in enumerate(keys)}
-        for pr, target in table:
-            for k in pr[:, 0] * n_at + pr[:, 1]:
-                if int(k) in where:
-                    values[where[int(k)]] = target
-
-    override(r.keys12, r.b0_np, bonds)
-    override(r.keys13, r.a0_np, angles)
-    r.b0 = torch.as_tensor(r.b0_np, dtype=torch.float32, device=device)
-    r.a0 = torch.as_tensor(r.a0_np, dtype=torch.float32, device=device)
+    set_targets(r, bonds + angles)
 
     t = {k: torch.as_tensor(v, device=device) for k, v in
          {"ca0": ca[nxt], "ca1": ca[nxt + 1], "o0": o[nxt],
           "n": n[has_cb], "ca": ca[has_cb], "c": c[has_cb], "cb": cb[has_cb]}.items()}
 
     t["c0"], t["n1"] = (torch.as_tensor(v, device=device) for v in (c[nxt], n[nxt + 1]))
+    lw = np.ones(len(nxt)) if link_weight is None else link_weight
+    cw = np.ones(len(n)) if chiral_weight is None else chiral_weight
 
     def extra(x):
+        wl = torch.as_tensor(lw, dtype=x.dtype, device=x.device)
+        wc = torch.as_tensor(cw[has_cb], dtype=x.dtype, device=x.device)
         cos_omega = cos_dihedral(x[t["ca0"]], x[t["c0"]], x[t["n1"]], x[t["ca1"]])
         return {
-            "peptide": (((x[t["ca0"]] - x[t["ca1"]]).norm(dim=1) - CA_CA) ** 2).sum()
-            + (((x[t["o0"]] - x[t["ca1"]]).norm(dim=1) - O_CA_NEXT) ** 2).sum()
-            + OMEGA_WEIGHT * (1 + cos_omega).sum(),
-            "chirality": ((chiral_volume(x[t["n"]], x[t["ca"]], x[t["c"]], x[t["cb"]]) - CHIRAL_VOLUME) ** 2).sum(),
+            "peptide": (wl * (((x[t["ca0"]] - x[t["ca1"]]).norm(dim=1) - CA_CA) ** 2
+                              + ((x[t["o0"]] - x[t["ca1"]]).norm(dim=1) - O_CA_NEXT) ** 2
+                              + OMEGA_WEIGHT * (1 + cos_omega))).sum(),
+            "chirality": (wc * (chiral_volume(x[t["n"]], x[t["ca"]], x[t["c"]], x[t["cb"]]) - CHIRAL_VOLUME) ** 2
+                          ).sum(),
         }
 
     return r, extra

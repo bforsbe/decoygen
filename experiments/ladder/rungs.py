@@ -16,6 +16,8 @@ from pathlib import Path
 ROOT = Path("runs/ladder")
 BOOK = Path("runs/bookmarks/raw-polymer")
 HALL = Path("runs/hallucination")
+CLI = ROOT / "build/cli"          # decoygen ladder --to 4 --out runs/ladder/build/cli --frame-box 144
+LADDER_CMD = "decoygen ladder --to 4 --out runs/ladder/build/cli --frame-box 144 --seed 0"
 
 
 @dataclass
@@ -34,24 +36,30 @@ class Rung:
 RUNGS = [
     Rung("0_hardcore", "Hard-core liquid",
          "protein atom density inside the envelope; atoms cannot overlap; no bonds",
-         BOOK / "hardcore_atoms.pdb", "experiments/polymer/compare.py (tag raw-polymer)",
-         deh="hardcore", det="hardcore"),
+         CLI / "rung0_hard_core_liquid.pdb", LADDER_CMD),
     Rung("1_gas", "Atom gas (v0 decoy)",
          "protein element mix and density, clustered (atoms may overlap like bonded neighbours); no bonds",
-         BOOK / "gas_atoms.pdb", "decoygen.generate defaults (tag raw-polymer)",
-         deh="gas", det="gas_check"),
+         CLI / "rung1_atom_gas.pdb", LADDER_CMD),
     Rung("2_raw_polymer", "Raw polymer",
          "covalent bond and 1-3 distances, valence per element, protein-like branching; self-avoiding",
-         BOOK / "polymer_atoms.pdb", "decoygen.polymer.build_polymer (tag raw-polymer)",
-         deh="polymer", det="polymer"),
+         CLI / "rung2_raw_polymer.pdb", LADDER_CMD),
     Rung("3_threaded_chain", "Threaded chain",
          "one linear molecule: the bond tree cut into its longest paths (>= 5 atoms), joined end to end by new atoms",
-         ROOT / "build/polymer_chain_split5_prune4.pdb",
-         "experiments/hallucination/thread.py runs/bookmarks/raw-polymer/polymer_atoms.pdb --split 5 --fill --prune 4 "
-         "--relax 3000 --out runs/ladder/build"),
-    # 4a peptide geometry (N-CA-C repeat, carbonyl O, planar trans peptide, L at CA)
-    # 4b allowed phi/psi (random-coil library); 4c branches on CA only
-    # 5 real side chains (random sequence); 6 secondary structure; 7 fold
+         CLI / "rung3_threaded_chain.pdb", LADDER_CMD),
+    Rung("4_peptide_backbone", "Peptide backbone",
+         "N-CA-C(=O) repeat, planar trans peptides, L-amino acids; side atoms regrouped on CB",
+         CLI / "rung4_peptide_backbone.pdb", LADDER_CMD),
+    Rung("4_peptide_backbone_mirror", "Peptide backbone, mirrored",
+         "rung 4 with D-amino acids (handedness control)",
+         CLI / "rung4_peptide_backbone_mirror.pdb", "decoygen mirror rung4_peptide_backbone.pdb"),
+    Rung("5_real_side_chains", "Real side chains",
+         "backbone thinned to a protein's residues per mass (in passes of 1 in 5), random natural-frequency "
+         "sequence, real side-chain conformations",
+         CLI / "rung5_real_side_chains.pdb", LADDER_CMD.replace("--to 4", "--to 5")),
+    Rung("5_real_side_chains_mirror", "Real side chains, mirrored",
+         "rung 5 with D-amino acids (handedness control)",
+         CLI / "rung5_real_side_chains_mirror.pdb", "decoygen mirror rung5_real_side_chains.pdb"),
+    # 6 secondary structure; 7 fold
     Rung("8_protein", "Real protein",
          "everything: 6CVM chain A (beta-galactosidase)",
          BOOK / "protein_atoms.pdb", "6CVM chain A, placed in the 144 A frame (tag raw-polymer)",
