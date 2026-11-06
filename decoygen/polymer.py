@@ -32,6 +32,7 @@ from pathlib import Path
 import numpy as np
 import torch
 from scipy import ndimage, sparse
+from scipy.sparse import csgraph
 from scipy.spatial import cKDTree
 
 from . import atoms
@@ -39,6 +40,8 @@ from . import atoms
 REFERENCE_FILE = Path(__file__).parent / "data" / "protein_reference.json"
 ELEMENTS = atoms.ELEMENTS
 MAX_DEGREE = 3
+# bonds per heavy atom in protein (reference): O is terminal in 98%, S has at most 2, C and N at most 3
+ELEMENT_MAX_DEGREE = {"C": 3, "N": 3, "O": 1, "S": 2}
 N_QUANTILES = 101
 
 
@@ -164,13 +167,15 @@ def degree_fractions(ref: dict) -> np.ndarray:
 # ---------------------------------------------------------------- topology
 
 def spanning_forest(pos: np.ndarray, *, branch_weight: float = 1.0, k: int = 16,
-                    max_degree: int = MAX_DEGREE, seed: int = 0) -> np.ndarray:
+                    max_degree: int | np.ndarray = MAX_DEGREE, seed: int = 0) -> np.ndarray:
     """Degree-capped minimum spanning forest (Prim). Returns edges (E, 2).
 
     Edge cost is length, times branch_weight when it would give the attached-to atom its
     third bond; branch_weight < 1 makes branch points (and leaves) more common.
+    max_degree is one cap for all atoms or a per-atom array (see element_caps).
     """
     n = len(pos)
+    cap = np.broadcast_to(np.asarray(max_degree), (n,))
     rng = np.random.default_rng(seed)
     dist, nbr = cKDTree(pos).query(pos, k=min(k + 1, n))
     dist, nbr = dist[:, 1:], nbr[:, 1:]
@@ -188,20 +193,21 @@ def spanning_forest(pos: np.ndarray, *, branch_weight: float = 1.0, k: int = 16,
 
     def add(i):
         in_tree[i] = True
-        push(i)
+        if deg[i] < cap[i]:
+            push(i)
 
     order = rng.permutation(n)
     next_root = 0
     while True:
         while heap:
             _, _, deg_at_push, i, j = heapq.heappop(heap)
-            if in_tree[j] or deg[i] >= max_degree or deg[i] != deg_at_push:
+            if in_tree[j] or deg[i] >= cap[i] or deg[i] != deg_at_push:
                 continue                         # stale: i was re-pushed when its degree changed
             edges.append((i, j))
             deg[i] += 1
             deg[j] += 1
             add(j)
-            if deg[i] < max_degree:
+            if deg[i] < cap[i]:
                 push(i)                          # i's remaining edges at their new cost
         while next_root < n and in_tree[order[next_root]]:
             next_root += 1
@@ -209,6 +215,11 @@ def spanning_forest(pos: np.ndarray, *, branch_weight: float = 1.0, k: int = 16,
             break
         add(int(order[next_root]))
     return np.array(edges, dtype=np.int64).reshape(-1, 2)
+
+
+def element_caps(els: np.ndarray) -> np.ndarray:
+    """Per-atom bond caps from ELEMENT_MAX_DEGREE, for re-wiring with fixed elements."""
+    return np.array([ELEMENT_MAX_DEGREE[ELEMENTS[e]] for e in els], dtype=np.int64)
 
 
 def fit_branch_weight(pos: np.ndarray, target: np.ndarray, seed: int = 0,
@@ -277,81 +288,135 @@ class Envelope:
         return torch.nn.functional.grid_sample(self.field, g, align_corners=True).view(-1)
 
 
-def relax(pos: torch.Tensor, els: np.ndarray, edges: np.ndarray, ref: dict, *,
-          envelope: Envelope | None = None, steps: int = 3000, lr: float = 0.02,
-          nonbonded_quantile: float = 0.01, ramp: float = 0.6, seed: int = 0, log=None) -> tuple[torch.Tensor, dict]:
-    """Restrained relaxation of a bonded forest. Returns (positions, info)."""
-    device = pos.device
-    n = len(pos)
-    rng = np.random.default_rng(seed)
-    p12, p13, p14 = graph_shells(n, edges)
-    b0 = torch.as_tensor(_sample_targets(p12, els, ref["quantiles"]["bond"], rng), dtype=torch.float32, device=device)
-    a0 = torch.as_tensor(_sample_targets(p13, els, ref["quantiles"]["angle"], rng), dtype=torch.float32, device=device)
-    qi = round(nonbonded_quantile * (N_QUANTILES - 1))
-    lb14 = _lower_bounds(ref["quantiles"]["torsion"], qi).to(device)
-    lbnb = _lower_bounds(ref["quantiles"]["nonbonded"], qi).to(device)
-    el = torch.as_tensor(els, device=device)
-    t12, t13, t14 = (torch.as_tensor(p, device=device) for p in (p12, p13, p14))
-    excluded = torch.sort(torch.cat([t[:, 0] * n + t[:, 1] for t in (t12, t13, t14)])).values
-    reach = float(lbnb.max()) + 0.5
+def _carry_targets(new_keys: np.ndarray, old_keys: np.ndarray, old_vals: np.ndarray, vals: np.ndarray) -> np.ndarray:
+    """Keep the previous target for pairs that already had one."""
+    if len(old_keys) == 0 or len(new_keys) == 0:
+        return vals
+    order = np.argsort(old_keys)
+    ko, vo = old_keys[order], old_vals[order]
+    idx = np.clip(np.searchsorted(ko, new_keys), 0, len(ko) - 1)
+    hit = ko[idx] == new_keys
+    vals = vals.copy()
+    vals[hit] = vo[idx[hit]]
+    return vals
 
-    def neighbour_pairs(x):
-        cand = []
+
+class Restraints:
+    """Covalent geometry and sterics of a bonded forest, by bond-graph distance g:
+
+    g = 1, 2   harmonic to per-pair targets drawn from the reference (bond, 1-3 distances)
+    g = 3      one-sided lower bound (torsions free)
+    g >= 4     one-sided steric lower bound per element pair (call update_neighbours)
+
+    `previous` (a Restraints on the same atoms) carries over targets of pairs present in
+    both, so re-wiring changes only the new bonds and angles.
+    """
+
+    def __init__(self, els: np.ndarray, edges: np.ndarray, ref: dict, device, *,
+                 nonbonded_quantile: float = 0.01, seed: int = 0, previous: Restraints | None = None):
+        n = len(els)
+        self.n, self.edges = n, edges
+        rng = np.random.default_rng(seed)
+        p12, p13, p14 = graph_shells(n, edges)
+        self.keys12, self.keys13 = p12[:, 0] * n + p12[:, 1], p13[:, 0] * n + p13[:, 1]
+        b0 = _sample_targets(p12, els, ref["quantiles"]["bond"], rng)
+        a0 = _sample_targets(p13, els, ref["quantiles"]["angle"], rng)
+        if previous is not None:
+            b0 = _carry_targets(self.keys12, previous.keys12, previous.b0_np, b0)
+            a0 = _carry_targets(self.keys13, previous.keys13, previous.a0_np, a0)
+        self.b0_np, self.a0_np = b0, a0
+        self.b0 = torch.as_tensor(b0, dtype=torch.float32, device=device)
+        self.a0 = torch.as_tensor(a0, dtype=torch.float32, device=device)
+        qi = round(nonbonded_quantile * (N_QUANTILES - 1))
+        self.lb14 = _lower_bounds(ref["quantiles"]["torsion"], qi).to(device)
+        self.lbnb = _lower_bounds(ref["quantiles"]["nonbonded"], qi).to(device)
+        self.el = torch.as_tensor(els, device=device)
+        self.t12, self.t13, self.t14 = (torch.as_tensor(p, device=device) for p in (p12, p13, p14))
+        self.excluded = torch.sort(torch.cat([t[:, 0] * n + t[:, 1] for t in (self.t12, self.t13, self.t14)])).values
+        self.reach = float(self.lbnb.max()) + 0.5
+        self.pnb = torch.zeros((0, 2), dtype=torch.long, device=device)
+
+    @staticmethod
+    def dist(x, p):
+        return (x[p[:, 0]] - x[p[:, 1]]).norm(dim=1)
+
+    @torch.no_grad()
+    def update_neighbours(self, x: torch.Tensor) -> None:
+        n, cand = self.n, []
         for s in range(0, n, 4096):                       # chunked to bound cdist memory
             d = torch.cdist(x[s:s + 4096], x, compute_mode="donot_use_mm_for_euclid_dist")
-            i, j = torch.nonzero(d < reach, as_tuple=True)
+            i, j = torch.nonzero(d < self.reach, as_tuple=True)
             i = i + s
             keep = i < j
             cand.append(torch.stack([i[keep], j[keep]], 1))
         cand = torch.cat(cand)
-        if len(excluded) == 0:
-            return cand
-        keys = cand[:, 0] * n + cand[:, 1]
-        hit = torch.searchsorted(excluded, keys).clamp(max=len(excluded) - 1)
-        return cand[excluded[hit] != keys]
+        if len(self.excluded):
+            keys = cand[:, 0] * n + cand[:, 1]
+            hit = torch.searchsorted(self.excluded, keys).clamp(max=len(self.excluded) - 1)
+            cand = cand[self.excluded[hit] != keys]
+        self.pnb = cand
 
-    def dist(x, p):
-        return (x[p[:, 0]] - x[p[:, 1]]).norm(dim=1)
+    def terms(self, x: torch.Tensor, steric_scale: float = 1.0) -> dict:
+        el, d = self.el, self.dist
+        return {
+            "bond": ((d(x, self.t12) - self.b0) ** 2).sum(),
+            "angle": ((d(x, self.t13) - self.a0) ** 2).sum(),
+            "torsion": (torch.relu(steric_scale * self.lb14[el[self.t14[:, 0]], el[self.t14[:, 1]]]
+                                   - d(x, self.t14)) ** 2).sum(),
+            "steric": (torch.relu(steric_scale * self.lbnb[el[self.pnb[:, 0]], el[self.pnb[:, 1]]]
+                                  - d(x, self.pnb)) ** 2).sum(),
+        }
 
+    @torch.no_grad()
+    def report(self, x: torch.Tensor) -> dict:
+        self.update_neighbours(x)
+        viol = self.lbnb[self.el[self.pnb[:, 0]], self.el[self.pnb[:, 1]]] - self.dist(x, self.pnb)
+        return {"n_bonds": len(self.t12), "n_angles": len(self.t13), "n_torsions": len(self.t14),
+                "bond_rmsd_A": float(((self.dist(x, self.t12) - self.b0) ** 2).mean().sqrt()),
+                "angle_rmsd_A": float(((self.dist(x, self.t13) - self.a0) ** 2).mean().sqrt()),
+                "steric_violations_gt_0.2A": int((viol > 0.2).sum()),
+                "steric_violation_max_A": float(viol.max()) if len(viol) else 0.0}
+
+
+def relax(pos: torch.Tensor, els: np.ndarray, edges: np.ndarray, ref: dict, *,
+          envelope: Envelope | None = None, steps: int = 3000, lr: float = 0.02,
+          nonbonded_quantile: float = 0.01, ramp: float = 0.6, seed: int = 0, log=None,
+          restraints: Restraints | None = None, extra=None) -> tuple[torch.Tensor, dict]:
+    """Restrained relaxation of a bonded forest. Returns (positions, info).
+
+    restraints: use these instead of Restraints(els, edges, ref) (e.g. with targets overridden);
+    extra: callable x -> dict of further energy terms (summed in, reported under their names).
+    """
+    n = len(pos)
+    r = restraints or Restraints(els, edges, ref, pos.device, nonbonded_quantile=nonbonded_quantile, seed=seed)
     x = pos.detach().clone().requires_grad_(True)
     opt = torch.optim.Adam([x], lr=lr)
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, steps, eta_min=0.05 * lr)
     ramp_steps = max(1, int(ramp * steps))
-    pnb = neighbour_pairs(x.detach())
     history = []
     for step in range(steps):
         if step % 10 == 0:
-            pnb = neighbour_pairs(x.detach())
-        s = min(1.0, 0.5 + 0.5 * step / ramp_steps)       # steric scale ramps 0.5 -> 1
-        e_b = ((dist(x, t12) - b0) ** 2).sum()
-        e_a = ((dist(x, t13) - a0) ** 2).sum()
-        e_14 = (torch.relu(s * lb14[el[t14[:, 0]], el[t14[:, 1]]] - dist(x, t14)) ** 2).sum()
-        e_nb = (torch.relu(s * lbnb[el[pnb[:, 0]], el[pnb[:, 1]]] - dist(x, pnb)) ** 2).sum()
+            r.update_neighbours(x.detach())
+        e = r.terms(x, steric_scale=min(1.0, 0.5 + 0.5 * step / ramp_steps))   # sterics ramp 0.5 -> 1
         e_env = (envelope.outside(x) ** 2).sum() if envelope is not None else x.new_zeros(())
-        loss = (e_b + e_a + e_14 + e_nb + e_env) / n
+        e_extra = extra(x) if extra is not None else {}
+        loss = (sum(e.values()) + e_env + sum(e_extra.values(), x.new_zeros(()))) / n
         opt.zero_grad()
         loss.backward()
         opt.step()
         sched.step()
         if step % 250 == 0 or step == steps - 1:
-            rec = {"step": step, "loss": float(loss), "bond": float(e_b / max(len(t12), 1)),
-                   "angle": float(e_a / max(len(t13), 1)), "steric": float((e_14 + e_nb) / n),
-                   "envelope": float(e_env / n)}
+            rec = {"step": step, "loss": float(loss), "bond": float(e["bond"] / max(len(r.t12), 1)),
+                   "angle": float(e["angle"] / max(len(r.t13), 1)),
+                   "steric": float((e["torsion"] + e["steric"]) / n), "envelope": float(e_env / n),
+                   **{k: float(v / n) for k, v in e_extra.items()}}
             history.append(rec)
             if log:
                 log(rec)
     x = x.detach()
-    pnb = neighbour_pairs(x)
-    viol = lbnb[el[pnb[:, 0]], el[pnb[:, 1]]] - dist(x, pnb)
-    info = {
-        "n_bonds": len(p12), "n_angles": len(p13), "n_torsions": len(p14),
-        "bond_rmsd_A": float(((dist(x, t12) - b0) ** 2).mean().sqrt()),
-        "angle_rmsd_A": float(((dist(x, t13) - a0) ** 2).mean().sqrt()),
-        "steric_violations_gt_0.2A": int((viol > 0.2).sum()),
-        "steric_violation_max_A": float(viol.max()) if len(viol) else 0.0,
-        "outside_envelope_gt_0.5A": int((envelope.outside(x) > 0.5).sum()) if envelope is not None else 0,
-        "history": history,
-    }
+    info = {**r.report(x),
+            "outside_envelope_gt_0.5A": int((envelope.outside(x) > 0.5).sum()) if envelope is not None else 0,
+            "history": history}
     return x, info
 
 
@@ -369,3 +434,108 @@ def build_polymer(pos0: torch.Tensor, ref: dict, *, envelope: Envelope | None = 
                 n_components=len(p) - len(edges),
                 composition={e: float((els == k).mean()) for k, e in enumerate(ELEMENTS)})
     return pos, torch.as_tensor(els, device=pos.device), edges, info
+
+
+# ---------------------------------------------------------------- soft bonds
+
+def _median_table(table: dict) -> torch.Tensor:
+    return _lower_bounds(table, (N_QUANTILES - 1) // 2)
+
+
+class SoftChemistry:
+    """Covalent geometry without a fixed bond list: every atom pair within reach is classified
+    by distance, with smooth (sigmoid) boundaries of width `width`, as
+
+        bonded     r < bond_cutoff (1.9 A, more with S)   harmonic to the element-pair median bond
+        1-3        bond_cutoff <= r < angle_cutoff        harmonic to the median 1-3 distance
+        free       beyond                                 steric lower bound per element pair
+
+    and two valence counts per atom hold the chemistry together: its soft bond count must
+    equal its target degree (`degree`, normally the degree it had in the bonded polymer, so
+    P(element | degree) is kept), and its soft 1-3 count must be at least the number of
+    two-bond paths through its soft partners, so every pair of bonds comes with a bond angle
+    (one-sided: close 1-4 and O/N contacts also fall in the 1-3 class). Bonds can then break and form wherever the pull on the
+    atoms wins over the count penalty. As width -> 0 the classes become hard and
+    `harden()` reads off an ordinary bond list for `Restraints`.
+    """
+
+    def __init__(self, els: np.ndarray, degree: np.ndarray, ref: dict, device, *,
+                 angle_cutoff: float = 2.65, nonbonded_quantile: float = 0.01, count_weight: float = 1.0):
+        self.n = len(els)
+        self.el = torch.as_tensor(els, device=device)
+        self.degree = torch.as_tensor(degree, dtype=torch.float32, device=device)
+        self.caps = torch.as_tensor(element_caps(els), device=device)
+        self.b0 = _median_table(ref["quantiles"]["bond"]).to(device)
+        self.a0 = _median_table(ref["quantiles"]["angle"]).to(device)
+        qi = round(nonbonded_quantile * (N_QUANTILES - 1))
+        self.lbnb = _lower_bounds(ref["quantiles"]["nonbonded"], qi).to(device)
+        self.rb = torch.tensor([[bond_cutoff(a, b) for b in ELEMENTS] for a in ELEMENTS], device=device)
+        self.ra = angle_cutoff
+        self.count_weight = count_weight
+        self.reach = max(float(self.lbnb.max()), angle_cutoff) + 0.5
+        self.pairs = torch.zeros((0, 2), dtype=torch.long, device=device)
+
+    @torch.no_grad()
+    def update_neighbours(self, x: torch.Tensor) -> None:
+        cand = []
+        for s in range(0, self.n, 4096):
+            d = torch.cdist(x[s:s + 4096], x, compute_mode="donot_use_mm_for_euclid_dist")
+            i, j = torch.nonzero(d < self.reach, as_tuple=True)
+            i = i + s
+            keep = i < j
+            cand.append(torch.stack([i[keep], j[keep]], 1))
+        self.pairs = torch.cat(cand)
+
+    def classify(self, x: torch.Tensor, width: float):
+        p, el = self.pairs, self.el
+        ea, eb = el[p[:, 0]], el[p[:, 1]]
+        r = (x[p[:, 0]] - x[p[:, 1]]).norm(dim=1)
+        wb = torch.sigmoid((self.rb[ea, eb] - r) / width)
+        wa = (1 - wb) * torch.sigmoid((self.ra - r) / width)
+        return r, wb, wa, 1 - wb - wa, ea, eb
+
+    def terms(self, x: torch.Tensor, width: float) -> dict:
+        p = self.pairs
+        r, wb, wa, wf, ea, eb = self.classify(x, width)
+        nb = x.new_zeros(self.n).index_add(0, p[:, 0], wb).index_add(0, p[:, 1], wb)
+        na = x.new_zeros(self.n).index_add(0, p[:, 0], wa).index_add(0, p[:, 1], wa)
+        # two-bond paths through i's partners j: sum_j wb_ij (nb_j - wb_ij)
+        paths = (x.new_zeros(self.n).index_add(0, p[:, 0], wb * (nb[p[:, 1]] - wb))
+                 .index_add(0, p[:, 1], wb * (nb[p[:, 0]] - wb)))
+        return {
+            "bond": (wb * (r - self.b0[ea, eb]) ** 2).sum(),
+            "angle": (wa * (r - self.a0[ea, eb]) ** 2).sum(),
+            "steric": (wf * torch.relu(self.lbnb[ea, eb] - r) ** 2).sum(),
+            "valence": self.count_weight * ((nb - self.degree) ** 2).sum(),
+            "angle_count": self.count_weight * (torch.relu(paths - na) ** 2).sum(),
+        }
+
+    @torch.no_grad()
+    def bonds(self, x: torch.Tensor) -> np.ndarray:
+        """Hard bond list: pairs inside the bond cutoff, shortest first, within element caps."""
+        self.update_neighbours(x)
+        r, wb, *_ = self.classify(x, 1e-3)
+        sel = wb > 0.5
+        p, r = self.pairs[sel].cpu().numpy(), r[sel].cpu().numpy()
+        caps, deg, out = self.caps.cpu().numpy(), np.zeros(self.n, dtype=int), []
+        for k in np.argsort(r):
+            i, j = p[k]
+            if deg[i] < caps[i] and deg[j] < caps[j]:
+                deg[i] += 1
+                deg[j] += 1
+                out.append((i, j))
+        return np.array(out, dtype=np.int64).reshape(-1, 2)
+
+
+def topology_stats(n: int, edges: np.ndarray, reference: np.ndarray | None = None) -> dict:
+    """Degree fractions, cycles and (optionally) bonds not in `reference`."""
+    deg = np.bincount(edges.ravel(), minlength=n)
+    adj = sparse.coo_matrix((np.ones(len(edges)), (edges[:, 0], edges[:, 1])), shape=(n, n))
+    n_comp = csgraph.connected_components(adj, directed=False)[0]
+    out = {"n_bonds": len(edges), "degree_fractions": [float((deg == d).mean()) for d in range(5)],
+           "cycles": int(len(edges) - n + n_comp), "components": int(n_comp)}
+    if reference is not None:
+        a = {tuple(e) for e in np.sort(edges, axis=1)}
+        b = {tuple(e) for e in np.sort(reference, axis=1)}
+        out["bonds_new"], out["bonds_lost"] = len(a - b), len(b - a)
+    return out

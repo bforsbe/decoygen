@@ -67,3 +67,47 @@ def test_relaxation_matches_bonds_and_clears_clashes(blob, ref):
     assert info["steric_violations_gt_0.2A"] <= 2
     d = (p[edges[:, 0]] - p[edges[:, 1]]).norm(dim=1)
     assert 1.2 < float(d.min()) and float(d.max()) < 1.95
+
+
+def test_element_caps_respected(blob):
+    els = np.random.default_rng(3).choice(4, size=len(blob), p=[0.63, 0.17, 0.19, 0.01])
+    caps = polymer.element_caps(els)
+    e = polymer.spanning_forest(blob, max_degree=caps)
+    deg = degrees(e, len(blob))
+    assert (deg <= caps).all()
+    assert deg[caps == 1].max() <= 1                                 # oxygens stay terminal
+
+
+def test_rewiring_keeps_targets_of_surviving_bonds(blob, ref):
+    els = np.zeros(len(blob), dtype=np.int64)
+    e1 = polymer.spanning_forest(blob, seed=0)
+    e2 = polymer.spanning_forest(blob, seed=1)
+    r1 = polymer.Restraints(els, e1, ref, "cpu", seed=0)
+    r2 = polymer.Restraints(els, e2, ref, "cpu", seed=5, previous=r1)
+    shared, i1, i2 = np.intersect1d(r1.keys12, r2.keys12, return_indices=True)
+    assert len(shared) > 0
+    assert np.array_equal(r1.b0_np[i1], r2.b0_np[i2])
+
+
+def test_soft_bonds_recover_a_relaxed_polymer_and_can_rewire(blob, ref):
+    els = np.zeros(len(blob), dtype=np.int64)                  # all carbon
+    edges = polymer.spanning_forest(blob, max_degree=polymer.element_caps(els))
+    x, _ = polymer.relax(torch.tensor(blob, dtype=torch.float32), els, edges, ref, steps=1500)
+    soft = polymer.SoftChemistry(els, degrees(edges, len(els)), ref, "cpu")
+    stats = polymer.topology_stats(len(els), soft.bonds(x), edges)
+    assert stats["bonds_new"] == 0 and stats["bonds_lost"] <= 2   # a relaxed tree reads back as itself
+
+    y = x.clone()
+    y[:30] += 1.0 * torch.nn.functional.normalize(torch.randn(30, 3, generator=torch.Generator().manual_seed(0)), dim=1)
+    y.requires_grad_(True)
+    opt = torch.optim.Adam([y], lr=0.01)
+    for i in range(300):
+        if i % 10 == 0:
+            soft.update_neighbours(y.detach())
+        loss = sum(soft.terms(y, 0.05).values()) / len(els)
+        opt.zero_grad()
+        loss.backward()
+        opt.step()
+    after = soft.bonds(y.detach())
+    assert polymer.topology_stats(len(els), after, edges)["bonds_new"] > 0
+    assert (degrees(after, len(els)) <= 3).all()

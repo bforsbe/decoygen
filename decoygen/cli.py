@@ -1,4 +1,10 @@
-"""Command line: decoygen generate | batch | calibrate."""
+"""Command line.
+
+Decoy maps (v0):   decoygen generate | batch | calibrate
+Atom-model ladder: decoygen gas | hardcore | polymer | thread | peptide | mirror | render | info | ladder
+                   (each model step makes the next rung of the protein-likeness ladder from the one
+                   below and refuses any other input; see decoygen/model.py)
+"""
 
 from __future__ import annotations
 
@@ -130,8 +136,139 @@ def cmd_calibrate(args) -> None:
     print(f"wrote {out}")
 
 
+# ---------------------------------------------------------------- protein-likeness ladder
+
+def _log(r: dict) -> None:
+    print("  step {step}: ".format(**r) + " ".join(f"{k} {v:.4g}" for k, v in r.items()
+                                                    if k not in ("step", "loss")), flush=True)
+
+
+def _save(m, args, info=None) -> None:
+    from .model import default_path, write
+
+    path = Path(args.out) if args.out else default_path(Path(args.input), m.rung, m.mirrored)
+    write(path, m, overwrite=args.overwrite)
+    if info is not None:
+        from .io import write_json
+
+        write_json(path.with_name(path.stem + "_info.json"), info)
+        print(json.dumps({k: v for k, v in info.items() if not isinstance(v, (dict, list))}, indent=1))
+    print(f"wrote {path}: {m.describe().splitlines()[0]}")
+
+
+def _read(args):
+    from .model import read
+
+    return read(args.input)
+
+
+def cmd_gas(args) -> None:
+    from .ladder import gas
+    from .model import write
+
+    m = gas(params_from_args(args), frame_box=args.frame_box, device=args.device or default_device())
+    write(args.out, m, overwrite=args.overwrite)
+    print(f"wrote {args.out}: {m.describe().splitlines()[0]}")
+
+
+def cmd_hardcore(args) -> None:
+    from .ladder import hardcore
+
+    m, info = hardcore(_read(args), steps=args.steps, seed=args.seed, device=args.device or default_device(),
+                       force=args.force, log=_log)
+    _save(m, args, info)
+
+
+def cmd_polymer(args) -> None:
+    from .ladder import build_polymer
+
+    m, info = build_polymer(_read(args), steps=args.steps, seed=args.seed, device=args.device or default_device(),
+                            force=args.force, log=_log)
+    _save(m, args, info)
+
+
+def cmd_thread(args) -> None:
+    from .ladder import thread_chain
+
+    m, info = thread_chain(_read(args), split=args.split or None, prune=args.prune, relax=args.relax,
+                           seed=args.seed, device=args.device or default_device(), force=args.force, log=_log)
+    _save(m, args, info)
+
+
+def cmd_peptide(args) -> None:
+    from .ladder import make_peptide
+
+    m, info = make_peptide(_read(args), steps=args.steps, keep_atoms=not args.add_atoms, seed=args.seed,
+                           device=args.device or default_device(), force=args.force, log=_log)
+    _save(m, args, info)
+
+
+def cmd_mirror(args) -> None:
+    from .ladder import mirror
+
+    _save(mirror(_read(args)), args)
+
+
+def cmd_render(args) -> None:
+    from .ladder import render
+
+    meta = render(_read(args), Path(args.out), apix=args.apix, resolution=args.resolution,
+                  snr_scale=args.snr_scale, seed=args.seed, device=args.device or default_device())
+    print(f"wrote {args.out}: truth, half1, half2, full, support ({meta['box_voxels']}^3 at {args.apix} A/px)")
+
+
+def cmd_info(args) -> None:
+    print(f"{args.input}: {_read(args).describe()}")
+
+
+def cmd_ladder(args) -> None:
+    from . import ladder
+    from .model import write
+
+    device = args.device or default_device()
+    out = Path(args.out)
+    out.mkdir(parents=True, exist_ok=True)
+    params = params_from_args(args)
+    kw = {"seed": params.seed, "device": device, "log": _log}
+
+    def save(m, info=None):
+        from .model import default_path
+
+        path = default_path(out / "x", m.rung, m.mirrored)
+        write(path, m, overwrite=args.overwrite)
+        if info is not None:
+            from .io import write_json
+
+            write_json(path.with_name(path.stem + "_info.json"), info)
+        print(f"wrote {path}", flush=True)
+        return m
+
+    m1 = save(ladder.gas(params, frame_box=args.frame_box, device=device))
+    save(*ladder.hardcore(m1, steps=args.steps, **kw))
+    m = m1
+    steps = [(2, lambda m: ladder.build_polymer(m, steps=args.steps, **kw)),
+             (3, lambda m: ladder.thread_chain(m, relax=args.steps, **kw)),
+             (4, lambda m: ladder.make_peptide(m, steps=args.steps, **kw))]
+    for rung, step in steps:
+        if rung > args.to:
+            break
+        m = save(*step(m))
+
+
+def _model_args(p, steps: bool = True) -> None:
+    p.add_argument("input", help="input model (PDB with a decoygen header)")
+    p.add_argument("-o", "--out", help="output PDB (default: rung<N>_<name>.pdb next to the input)")
+    p.add_argument("--overwrite", action="store_true")
+    p.add_argument("--force", action="store_true", help="skip the rung check (recorded in the history)")
+    p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--device")
+    if steps:
+        p.add_argument("--steps", type=int, default=3000, help="relaxation steps")
+
+
 def main(argv=None) -> None:
-    ap = argparse.ArgumentParser(prog="decoygen", description=__doc__)
+    ap = argparse.ArgumentParser(prog="decoygen", description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     p = sub.add_parser("generate", help="generate one decoy")
@@ -165,8 +302,70 @@ def main(argv=None) -> None:
     add_param_args(p)
     p.set_defaults(func=cmd_calibrate)
 
+    p = sub.add_parser("gas", help="rung 1: the v0 decoy's atom gas, as a model")
+    p.add_argument("-o", "--out", required=True)
+    p.add_argument("--frame-box", type=float, help="centre in a frame of this edge (A), e.g. 144")
+    p.add_argument("--overwrite", action="store_true")
+    p.add_argument("--device")
+    add_param_args(p)
+    p.set_defaults(func=cmd_gas)
+
+    p = sub.add_parser("hardcore", help="rung 1 -> rung 0: push the gas atoms apart, no bonds")
+    _model_args(p)
+    p.set_defaults(func=cmd_hardcore)
+
+    p = sub.add_parser("polymer", help="rung 1 -> rung 2: bonded tree with protein geometry")
+    _model_args(p)
+    p.set_defaults(func=cmd_polymer)
+
+    p = sub.add_parser("thread", help="rung 2 -> rung 3: one linear chain")
+    _model_args(p, steps=False)
+    p.add_argument("--split", type=int, default=5, help="cut the tree into longest paths of >= SPLIT atoms (0: off)")
+    p.add_argument("--prune", type=int, default=4, help="max bonds from the backbone for side atoms")
+    p.add_argument("--relax", type=int, default=3000, help="relaxation steps")
+    p.set_defaults(func=cmd_thread)
+
+    p = sub.add_parser("peptide", help="rung 3 -> rung 4: N-CA-C(=O) backbone, trans peptides, L-amino acids")
+    _model_args(p)
+    p.add_argument("--add-atoms", action="store_true",
+                   help="add the carbonyl O atoms on top (default: trim side atoms to keep the atom count)")
+    p.set_defaults(func=cmd_peptide)
+
+    p = sub.add_parser("mirror", help="any rung -> its mirror image (last step only)")
+    _model_args(p, steps=False)
+    p.set_defaults(func=cmd_mirror)
+
+    p = sub.add_parser("render", help="model -> truth map, noisy half-maps, their mean, support")
+    p.add_argument("input")
+    p.add_argument("-o", "--out", required=True, help="output directory")
+    p.add_argument("--apix", type=float, default=1.0)
+    p.add_argument("--resolution", type=float, default=3.5, help="FSC = 0.143 here")
+    p.add_argument("--snr-scale", type=float, default=1.0)
+    p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--device")
+    p.set_defaults(func=cmd_render)
+
+    p = sub.add_parser("info", help="rung and history of a model")
+    p.add_argument("input")
+    p.set_defaults(func=cmd_info)
+
+    p = sub.add_parser("ladder", help="build rungs 0..TO in one directory (gas, hardcore, polymer, ...)")
+    p.add_argument("--to", type=int, default=4, choices=range(1, 5))
+    p.add_argument("--out", required=True)
+    p.add_argument("--frame-box", type=float)
+    p.add_argument("--steps", type=int, default=3000)
+    p.add_argument("--overwrite", action="store_true")
+    p.add_argument("--device")
+    add_param_args(p)
+    p.set_defaults(func=cmd_ladder)
+
     args = ap.parse_args(argv)
-    args.func(args)
+    from .model import RungError
+
+    try:
+        args.func(args)
+    except (RungError, FileExistsError) as e:
+        ap.exit(2, f"decoygen {args.cmd}: {e}\n")
 
 
 if __name__ == "__main__":

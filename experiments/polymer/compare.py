@@ -73,24 +73,7 @@ def protein_atoms(device):
 
 
 def write_pdb(path: Path, pos: torch.Tensor, el: torch.Tensor, edges: np.ndarray | None = None) -> None:
-    """HETATM records (one atom per UNK residue, chains of 9999) plus CONECT for the bonds."""
-    xyz = pos.detach().cpu().numpy()[:, ::-1]
-    lines = []
-    for k, (p, e) in enumerate(zip(xyz, el.tolist())):
-        name = atoms.ELEMENTS[e]
-        chain = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"[k // 9999]
-        lines.append(f"HETATM{k + 1:5d}  {name:<3s} UNK {chain}{k % 9999 + 1:4d}    "
-                     f"{p[0]:8.3f}{p[1]:8.3f}{p[2]:8.3f}  1.00{BFACTOR:6.2f}          {name:>2s}")
-    if edges is not None and len(edges):
-        partners = [[] for _ in range(len(xyz))]
-        for i, j in edges:
-            partners[i].append(j)
-            partners[j].append(i)
-        for i, ps in enumerate(partners):
-            for s in range(0, len(ps), 4):
-                lines.append(f"CONECT{i + 1:5d}" + "".join(f"{j + 1:5d}" for j in ps[s:s + 4]))
-    lines.append("END")
-    path.write_text("\n".join(lines) + "\n")
+    io.write_pdb(path, pos.detach().cpu().numpy(), el.tolist(), atoms.ELEMENTS, edges, BFACTOR)
 
 
 def pair_density(pos: torch.Tensor, rmax=8.0, dr=0.1) -> np.ndarray:
