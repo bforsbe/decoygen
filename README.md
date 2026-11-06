@@ -75,7 +75,13 @@ decoygen render  run/rung5_real_side_chains.pdb -o run/maps5   # truth, half-map
 decoygen info    run/rung5_real_side_chains.pdb  # rung and full history
 
 decoygen ladder --to 5 --out run --frame-box 144 # all of the above (rungs 0-5) in one go
+decoygen ladder --to 5 --out run_c3 --frame-box 144 --symmetry C3   # a C3 assembly: one unit + operators
+decoygen expand run_c3/rung5_real_side_chains.pdb -o c3_full.pdb    # the whole assembly, one chain per copy
 ```
+
+A symmetric model holds one asymmetric unit and its operators (also as `REMARK 350 BIOMT`, so ChimeraX
+shows the assembly with `sym #1 assembly 1`). Every step relaxes the unit against its symmetry images, so
+interfaces are built from both sides at every rung.
 
 The atom count, and so the map's mass, is the same on every rung from 1 to 5. Threading pays for
 each bridging atom by removing the nearest side-branch leaf (`--no-conserve` keeps them all, which adds

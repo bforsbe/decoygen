@@ -273,13 +273,26 @@ def _lower_bounds(table: dict, quantile_index: int) -> torch.Tensor:
 
 
 class Envelope:
-    """Smooth confinement: squared distance (A) outside the mask, trilinearly interpolated."""
+    """Smooth confinement: squared distance (A) outside the mask, trilinearly interpolated.
 
-    def __init__(self, mask: np.ndarray, apix: float, device):
+    With symmetry operators (ops: (n, 3, 3) rotations in [z, y, x], ops[0] the identity, about `centre`
+    in A), the atoms relaxed are one asymmetric unit and `images` gives the other copies; relax then
+    adds sterics between the unit and its images, so interfaces relax from both sides at once."""
+
+    def __init__(self, mask: np.ndarray, apix: float, device, ops: np.ndarray | None = None,
+                 centre: np.ndarray | None = None):
         self.apix = apix
         out = ndimage.distance_transform_edt(~mask) * apix
         self.field = torch.as_tensor(out, dtype=torch.float32, device=device)[None, None]
         self.n = mask.shape[0]
+        self.ops = self.centre = None
+        if ops is not None and len(ops) > 1:
+            self.ops = torch.as_tensor(np.asarray(ops)[1:], dtype=torch.float32, device=device)
+            self.centre = torch.as_tensor(np.asarray(centre), dtype=torch.float32, device=device)
+
+    def images(self, x: torch.Tensor) -> torch.Tensor:
+        """(n_ops - 1, N, 3): every non-identity copy of the positions x (differentiable)."""
+        return self.centre + (x - self.centre)[None] @ self.ops.transpose(1, 2)
 
     def outside(self, pos: torch.Tensor) -> torch.Tensor:
         """Distance outside the envelope for each position (0 inside)."""
@@ -378,6 +391,33 @@ class Restraints:
                 "steric_violation_max_A": float(viol.max()) if len(viol) else 0.0}
 
 
+class ImageSterics:
+    """Steric lower bounds between an asymmetric unit and its symmetry images (no bonds across copies)."""
+
+    def __init__(self, envelope: Envelope, r: Restraints):
+        self.env, self.lb, self.el, self.reach = envelope, r.lbnb, r.el, r.reach
+        self.pairs = torch.zeros((0, 2), dtype=torch.long, device=r.el.device)
+
+    @torch.no_grad()
+    def update(self, x: torch.Tensor) -> None:
+        img = self.env.images(x).reshape(-1, 3)
+        cand = []
+        for s in range(0, len(x), 4096):
+            d = torch.cdist(x[s:s + 4096], img, compute_mode="donot_use_mm_for_euclid_dist")
+            i, j = torch.nonzero(d < self.reach, as_tuple=True)
+            cand.append(torch.stack([i + s, j], 1))
+        self.pairs = torch.cat(cand)
+
+    def violation(self, x: torch.Tensor, scale: float = 1.0) -> torch.Tensor:
+        n = len(x)
+        img = self.env.images(x).reshape(-1, 3)
+        i, j = self.pairs[:, 0], self.pairs[:, 1]
+        return scale * self.lb[self.el[i], self.el[j % n]] - (x[i] - img[j]).norm(dim=1)
+
+    def term(self, x: torch.Tensor, scale: float = 1.0) -> torch.Tensor:
+        return (torch.relu(self.violation(x, scale)) ** 2).sum()
+
+
 def relax(pos: torch.Tensor, els: np.ndarray, edges: np.ndarray, ref: dict, *,
           envelope: Envelope | None = None, steps: int = 3000, lr: float = 0.02,
           nonbonded_quantile: float = 0.01, ramp: float = 0.6, seed: int = 0, log=None,
@@ -394,10 +434,16 @@ def relax(pos: torch.Tensor, els: np.ndarray, edges: np.ndarray, ref: dict, *,
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, steps, eta_min=0.05 * lr)
     ramp_steps = max(1, int(ramp * steps))
     history = []
+    sym = ImageSterics(envelope, r) if envelope is not None and envelope.ops is not None else None
     for step in range(steps):
         if step % 10 == 0:
             r.update_neighbours(x.detach())
-        e = r.terms(x, steric_scale=min(1.0, 0.5 + 0.5 * step / ramp_steps))   # sterics ramp 0.5 -> 1
+            if sym is not None:
+                sym.update(x.detach())
+        scale = min(1.0, 0.5 + 0.5 * step / ramp_steps)                            # sterics ramp 0.5 -> 1
+        e = r.terms(x, steric_scale=scale)
+        if sym is not None:
+            e["images"] = sym.term(x, scale)
         e_env = (envelope.outside(x) ** 2).sum() if envelope is not None else x.new_zeros(())
         e_extra = extra(x) if extra is not None else {}
         loss = (sum(e.values()) + e_env + sum(e_extra.values(), x.new_zeros(()))) / n
@@ -409,12 +455,21 @@ def relax(pos: torch.Tensor, els: np.ndarray, edges: np.ndarray, ref: dict, *,
             rec = {"step": step, "loss": float(loss), "bond": float(e["bond"] / max(len(r.t12), 1)),
                    "angle": float(e["angle"] / max(len(r.t13), 1)),
                    "steric": float((e["torsion"] + e["steric"]) / n), "envelope": float(e_env / n),
+                   **({"images": float(e["images"] / n)} if "images" in e else {}),
                    **{k: float(v / n) for k, v in e_extra.items()}}
             history.append(rec)
             if log:
                 log(rec)
     x = x.detach()
-    info = {**r.report(x),
+    if sym is not None:
+        with torch.no_grad():
+            sym.update(x)
+            v = sym.violation(x)
+        sym_info = {"image_contacts": len(v), "image_violations_gt_0.2A": int((v > 0.2).sum()),
+                    "image_violation_max_A": float(v.max()) if len(v) else 0.0}
+    else:
+        sym_info = {}
+    info = {**r.report(x), **sym_info,
             "outside_envelope_gt_0.5A": int((envelope.outside(x) > 0.5).sum()) if envelope is not None else 0,
             "history": history}
     return x, info

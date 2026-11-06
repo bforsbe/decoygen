@@ -11,6 +11,10 @@
 
 Every step checks its input's rung (model.require) and records itself in the output's history.
 Steps after gas relax inside the input model's own envelope (model.envelope_mask).
+
+Symmetric models (gas with symmetry="C3" etc.) hold one asymmetric unit: every step works on that unit
+and relaxes it against its symmetry images (polymer.Envelope), so interfaces are built from both sides
+at every rung; render expands the assembly.
 """
 
 from __future__ import annotations
@@ -26,7 +30,7 @@ from . import atoms, io, noise, peptide, polymer, sidechains, thread
 from .constants import MASS_PER_HEAVY_ATOM
 from .envelope import make_envelope
 from .fourier import Grid
-from .model import Model, envelope_mask, require
+from .model import Model, envelope_mask, expand, require
 from .params import DecoyParams
 from .roughness import roughness_parameters
 from .turing import turing_field
@@ -36,30 +40,53 @@ SUPPORT_SIGMA, SUPPORT_LEVEL = 2.0, 0.2
 
 
 def _envelope(m: Model, device) -> polymer.Envelope:
-    return polymer.Envelope(envelope_mask(m.pos, m.box), 1.0, device)
+    """The input's own envelope; for a symmetric model, the whole assembly's, with the operators."""
+    if not m.symmetry:
+        return polymer.Envelope(envelope_mask(m.pos, m.box), 1.0, device)
+    return polymer.Envelope(envelope_mask(expand(m).pos, m.box), 1.0, device, ops=m.symmetry["ops"],
+                            centre=m.symmetry["centre"])
 
 
 def _tensor(m: Model, device) -> torch.Tensor:
     return torch.as_tensor(m.pos, dtype=torch.float32, device=device)
 
 
-def gas(params: DecoyParams, *, frame_box: float | None = None, device: str = "cpu") -> Model:
+def gas(params: DecoyParams, *, frame_box: float | None = None, device: str = "cpu", symmetry: str | None = None,
+        contact: float = 0.6, swap: float = 0.0, axis: np.ndarray | None = None,
+        shift: np.ndarray | None = None) -> Model:
     """The default pipeline's envelope and atom gas (pipeline.generate up to sample_gas), centred
-    in a frame_box A frame (default: the decoy's own box)."""
+    in a frame_box A frame (default: the decoy's own box).
+
+    symmetry ("C3", ...): the envelope is a symmetric assembly (symmetry.make_symmetric_envelope;
+    params.mass_kda is the whole assembly's) and the model is one asymmetric unit: the subunit's share
+    of the atoms, drawn in subunit 1's region, with the operators."""
     params.validate()
     g = Grid(params.box, params.apix, device)
     rough = roughness_parameters(params.roughness_D, params.alpha, params.roughness_amplitude)
-    mask, _ = make_envelope(
-        g, volume=params.volume, alpha=rough["alpha"], roughness_amplitude=rough["roughness_amplitude"],
-        compactness=params.compactness, n_domains=params.n_domains, elongation=params.elongation,
-        bias=params.envelope_bias, clearance=params.edge_clearance, seed=params.seed)
+    sym = None
+    if symmetry and symmetry.upper() != "C1":
+        from .symmetry import make_symmetric_envelope
+
+        env = make_symmetric_envelope(
+            g, symmetry=symmetry, volume=params.volume, alpha=rough["alpha"],
+            roughness_amplitude=rough["roughness_amplitude"], compactness=params.compactness,
+            bias=params.envelope_bias, clearance=params.edge_clearance, seed=params.seed, contact=contact,
+            swap=swap, axis=axis, shift=shift)
+        mask, region, sym = env.mask, env.labels == 1, env
+    else:
+        mask, _ = make_envelope(
+            g, volume=params.volume, alpha=rough["alpha"], roughness_amplitude=rough["roughness_amplitude"],
+            compactness=params.compactness, n_domains=params.n_domains, elongation=params.elongation,
+            bias=params.envelope_bias, clearance=params.edge_clearance, seed=params.seed)
+        region = mask
     turing, _ = turing_field(
         g, mask, wavelength=params.meso_wavelength, quotient=params.turing_quotient,
         fill_fraction=params.fill_fraction, iterations=params.turing_iterations, dt=params.turing_dt,
         seed=params.seed)
-    m = torch.as_tensor(mask, device=device)
+    m = torch.as_tensor(region, device=device)
     intensity = ((1 - params.meso_strength) + params.meso_strength * turing) * m
-    n_atoms = round(params.mass_kda * 1e3 / MASS_PER_HEAVY_ATOM)
+    n_copies = 1 if sym is None else sym.info["n_subunits"]
+    n_atoms = round(params.mass_kda * 1e3 / MASS_PER_HEAVY_ATOM / n_copies)
     pos, el = atoms.sample_gas(g, intensity, n_atoms, params.seed, "atoms")
     own = params.box * params.apix
     frame = float(frame_box or own)
@@ -68,9 +95,16 @@ def gas(params: DecoyParams, *, frame_box: float | None = None, device: str = "c
     defaults = DecoyParams()
     changed = {f.name: getattr(params, f.name) for f in dataclasses.fields(params)
                if f.name != "seed" and getattr(params, f.name) != getattr(defaults, f.name)}
-    return Model(pos=pos.cpu().numpy().astype(np.float64) + (frame - own) / 2, els=el.cpu().numpy(),
-                 edges=np.zeros((0, 2), dtype=np.int64), box=frame).then(
-        1, "gas", seed=params.seed, frame_box=frame, **{k: str(v).replace(" ", "") for k, v in changed.items()})
+    if sym is not None:
+        changed.update(symmetry=sym.info["symmetry"], contact=contact, swap=swap,
+                       axis=",".join(f"{v:.4f}" for v in sym.info["axis_zyx"][::-1]))
+    off = (frame - own) / 2
+    out = Model(pos=pos.cpu().numpy().astype(np.float64) + off, els=el.cpu().numpy(),
+                edges=np.zeros((0, 2), dtype=np.int64), box=frame,
+                symmetry=None if sym is None else {"group": sym.info["symmetry"], "centre": sym.centre + off,
+                                                   "ops": sym.ops})
+    return out.then(1, "gas", seed=params.seed, frame_box=frame,
+                    **{k: str(v).replace(" ", "") for k, v in changed.items()})
 
 
 def hardcore(m: Model, *, steps: int = 3000, seed: int = 0, device: str = "cpu", force=False, log=None):
@@ -191,6 +225,11 @@ def mirror(m: Model) -> Model:
     out.pos = m.pos.copy()
     out.pos[:, 2] = m.box - m.pos[:, 2]                                # [z, y, x]
     out.mirrored = not m.mirrored
+    if m.symmetry:                                                     # reflect the operators too: M g M
+        mm = np.diag([1.0, 1.0, -1.0])
+        c = np.array(m.symmetry["centre"], dtype=np.float64).copy()
+        c[2] = m.box - c[2]
+        out.symmetry = {**m.symmetry, "centre": c, "ops": np.array([mm @ g @ mm for g in m.symmetry["ops"]])}
     return out
 
 
@@ -199,6 +238,7 @@ def render(m: Model, out: Path, *, apix: float = 1.0, resolution: float = 3.5, s
     """truth (noise-free), half1, half2 (independent white noise, FSC = 0.143 at `resolution`),
     full (their mean), support; the model's rung and history go into the MRC labels and maps.json."""
     out.mkdir(parents=True, exist_ok=True)
+    m = expand(m)                                                      # symmetric: the whole assembly
     n = round(m.box / apix)
     n += n % 2
     grid = Grid(n, apix, device)

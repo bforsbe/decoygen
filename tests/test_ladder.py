@@ -4,7 +4,7 @@ from scipy import sparse
 from scipy.sparse.csgraph import connected_components
 
 from decoygen import cli, ladder, peptide, sidechains
-from decoygen.model import Model, RungError, read, require, write
+from decoygen.model import Model, RungError, expand, read, require, write
 from decoygen.params import DecoyParams
 
 SMALL = {"box": 64, "apix": 1.0, "mass_kda": 12.0, "edge_clearance": 5.0, "turing_iterations": 80,
@@ -128,3 +128,42 @@ def test_thread_pays_for_its_bridge_atoms(rungs):
     m2, m3, info3 = rungs[1], rungs[2], rungs[5]
     assert info3["added"] > 0 and info3["removed_for_bridges"] == info3["added"]
     assert m3.n == m2.n - info3["pruned"]                             # no net mass from the bridges
+
+
+@pytest.fixture(scope="module")
+def sym_rungs():
+    m1 = ladder.gas(DecoyParams(seed=3, **SMALL), symmetry="C3")
+    m2, i2 = ladder.build_polymer(m1, steps=300)
+    m3, i3 = ladder.thread_chain(m2, relax=300)
+    return m1, m2, m3, i2, i3
+
+
+def test_symmetric_gas_is_one_unit_with_operators(sym_rungs):
+    m1 = sym_rungs[0]
+    plain = ladder.gas(DecoyParams(seed=3, **SMALL))
+    assert m1.symmetry["group"] == "C3" and len(m1.symmetry["ops"]) == 3
+    assert abs(3 * m1.n - plain.n) <= 3                                # the unit carries a third of the mass
+    full = expand(m1)
+    assert full.n == 3 * m1.n and len(np.unique((full.resseq - 1) // 9999)) == 3   # one chain per copy
+
+
+def test_symmetric_steps_relax_against_their_images(sym_rungs):
+    _, _, m3, i2, i3 = sym_rungs
+    for info in (i2, i3):
+        assert info["image_contacts"] > 0 and info["image_violations_gt_0.2A"] == 0
+    assert m3.symmetry["group"] == "C3" and pieces(m3) == 1           # each copy is one chain
+
+
+def test_symmetry_survives_files_and_mirroring(sym_rungs, tmp_path):
+    m3 = sym_rungs[2]
+    back = read(write(tmp_path / "s.pdb", m3))
+    assert back.symmetry["group"] == "C3"
+    assert np.allclose(back.symmetry["ops"], m3.symmetry["ops"], atol=1e-6)
+    assert np.allclose(back.symmetry["centre"], m3.symmetry["centre"], atol=1e-3)
+    assert "REMARK 350   BIOMT1   3" in (tmp_path / "s.pdb").read_text()
+    mm = ladder.mirror(m3)
+    assert np.allclose(np.linalg.det(mm.symmetry["ops"]), 1.0)          # still proper rotations
+    a, b = expand(m3).pos, expand(mm).pos                               # the mirror of the whole assembly
+    a = a.copy()
+    a[:, 2] = m3.box - a[:, 2]
+    assert np.allclose(a, b, atol=1e-6)

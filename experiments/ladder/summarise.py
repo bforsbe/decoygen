@@ -142,8 +142,13 @@ def n50_of(res, v):
 
 
 def plot(results: dict, path: Path):
-    groups = [("main", "Protein-likeness ladder"), ("branch", "Branch: optimised against the C-alpha CNN")]
-    fig, axes = plt.subplots(1, 2, figsize=(13, 4.6), gridspec_kw={"width_ratios": [3, 3]}, sharey=True)
+    groups = [("main", "Protein-likeness ladder"), ("sym", "Symmetric assemblies"),
+              ("branch", "Branch: optimised against the C-alpha CNN")]
+    groups = [g for g in groups if any(r.group == g[0] and r.id in results for r in RUNGS)]
+    widths = [max(3, sum(r.group == g and r.id in results for r in RUNGS)) for g, _ in groups]
+    fig, axes = plt.subplots(1, len(groups), figsize=(0.62 * sum(widths) + 2, 4.6),
+                             gridspec_kw={"width_ratios": widths}, sharey=True)
+    axes = np.atleast_1d(axes)
     for ax, (group, title) in zip(axes, groups):
         ids = [r.id for r in RUNGS if r.group == group and r.id in results]
         analyse.style(ax)

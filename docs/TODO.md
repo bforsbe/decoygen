@@ -23,8 +23,11 @@
 - [ ] Symmetry and multi-domain assemblies. Started with Cn: 2-D toy in `experiments/symmetry/toy2d.py`
       (competing copies of one subunit field; owner = argmax; group averaging after non-symmetric steps).
   - Design and toy figure: `docs/SYMMETRY.md`, `docs/figures/symmetry_cn_toy2d.png`.
-  - [ ] Atoms built symmetrically along the way: ASU + symmetry operations in the file, images in every
-        relaxation's sterics, ASU confined to its own subunit region (SYMMETRY.md, "Atoms").
+  - [x] Atoms built symmetrically along the way: ASU + symmetry operations in the file, images in every
+        relaxation's sterics (SYMMETRY.md, "Atoms"). C3/C7 ladders evaluated in runs/ladder/sym.
+  - [ ] Side-chain placement: score clashes against images too.
+  - [ ] Symmetrised half-map noise (as imposed symmetry does in reconstruction), optional.
+  - [ ] A real Cn oligomer as the symmetric protein control (6CVM is D2: needs Dn).
   - [x] 3-D Cn envelope + subunit label map (`decoygen envelope --symmetry Cn`), general rotation-list design.
   - [ ] Core exclusion for hollow assemblies (SYMMETRY.md, "Hollow assemblies"): a Bernoulli draw p(group, n),
         pore radius as the controlled quantity, a group-invariant term in the field; fill only voids cut off

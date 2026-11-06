@@ -18,6 +18,16 @@ BOOK = Path("runs/bookmarks/raw-polymer")
 HALL = Path("runs/hallucination")
 CLI = ROOT / "build/cli"          # decoygen ladder --to 4 --out runs/ladder/build/cli --frame-box 144
 LADDER_CMD = "decoygen ladder --to 4 --out runs/ladder/build/cli --frame-box 144 --seed 0"
+CONTACT = {"C3": 0.6, "C7": 0.5}                                  # C7 at 0.5: a ring with a pore
+
+
+def SYM(sym: str) -> Path:                                         # expanded assemblies (decoygen expand)
+    return ROOT / f"build/sym_{sym.lower()}/expanded"
+
+
+def SYM_CMD(sym: str) -> str:
+    return (f"decoygen ladder --to 5 --symmetry {sym} --contact {CONTACT[sym]} --frame-box 144 --seed 0 "
+            f"--out runs/ladder/build/sym_{sym.lower()}; decoygen expand")
 
 
 @dataclass
@@ -27,7 +37,7 @@ class Rung:
     adds: str                     # the protein knowledge this rung adds
     source: Path | None           # atom model (pdb with CONECT, or cif); None = not built yet
     recipe: str                   # how the atoms were made
-    group: str = "main"           # "main" or "branch"
+    group: str = "main"           # "main", "sym" (symmetric assemblies) or "branch"
     mirror: bool = False          # mirror the source through x = 72 A (the box centre)
     deh: str | None = None        # existing results: NAME in runs/deepemhancer
     det: str | None = None        # existing results: NAME in runs/hallucination
@@ -68,6 +78,22 @@ RUNGS = [
          "everything except handedness (D-amino acids, left-handed helices)",
          BOOK / "protein_atoms.pdb", "6CVM chain A mirrored through x = 72 A", mirror=True,
          deh="protein_mirror", det="protein_mirror"),
+
+    *[r for sym in ("C3", "C7") for r in (
+        Rung(f"{sym}.1_gas", f"{sym} atom gas", f"rung 1 as a {sym} assembly (one unit + operators)",
+             SYM(sym) / "rung1_atom_gas.pdb", SYM_CMD(sym), group="sym"),
+        Rung(f"{sym}.2_raw_polymer", f"{sym} raw polymer", "rung 2, relaxed against its symmetry images",
+             SYM(sym) / "rung2_raw_polymer.pdb", SYM_CMD(sym), group="sym"),
+        Rung(f"{sym}.3_threaded_chain", f"{sym} threaded chain", "rung 3, one chain per copy",
+             SYM(sym) / "rung3_threaded_chain.pdb", SYM_CMD(sym), group="sym"),
+        Rung(f"{sym}.4_peptide_backbone", f"{sym} peptide backbone", "rung 4 per copy",
+             SYM(sym) / "rung4_peptide_backbone.pdb", SYM_CMD(sym), group="sym"),
+        Rung(f"{sym}.5_real_side_chains", f"{sym} real side chains", "rung 5 per copy",
+             SYM(sym) / "rung5_real_side_chains.pdb", SYM_CMD(sym), group="sym"),
+        Rung(f"{sym}.5m_real_side_chains_mirror", f"{sym} real side chains, mirrored",
+             "rung 5 with D-amino acids (handedness control)",
+             SYM(sym) / "rung5_real_side_chains_mirror.pdb", SYM_CMD(sym) + "; decoygen mirror", group="sym"),
+    )],
 
     Rung("B1_gas_detector", "Gas optimised against the C-alpha CNN",
          "rung 1, atoms moved to maximise sum p^4 of ModelAngelo's C-alpha CNN (min distance 2.2 A)",

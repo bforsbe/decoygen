@@ -3,7 +3,7 @@
 Decoy maps (v0):   decoygen generate | batch | calibrate
 Envelopes:         decoygen envelope (optionally symmetric: --symmetry C3, divided into subunits)
 Atom-model ladder: decoygen gas | hardcore | polymer | thread | peptide | sidechains | mirror | render |
-                   info | ladder
+                   info | ladder | expand
                    (each model step makes the next rung of the protein-likeness ladder from the one
                    below and refuses any other input; see decoygen/model.py)
 """
@@ -82,27 +82,17 @@ def cmd_generate(args) -> None:
 
 
 def cmd_envelope(args) -> None:
-    import numpy as np
-
     from .fourier import Grid
     from .roughness import roughness_parameters
     from .symmetry import make_symmetric_envelope, save
 
     params = params_from_args(args)
     rough = roughness_parameters(params.roughness_D, params.alpha, params.roughness_amplitude)
-    if args.axis == "z":
-        axis = np.array([1.0, 0, 0])
-    elif args.axis == "random":
-        v = np.random.default_rng(params.seed).normal(size=3)
-        axis = v / np.linalg.norm(v)
-    else:
-        axis = np.array([float(x) for x in args.axis.split(",")])[::-1]          # given as x,y,z
-    shift = np.array(args.shift[::-1], dtype=float) if args.shift else None    # given as x y z (A)
     env = make_symmetric_envelope(
-        Grid(params.box, params.apix, args.device or default_device()), symmetry=args.symmetry,
-        volume=params.volume, alpha=rough["alpha"], roughness_amplitude=rough["roughness_amplitude"],
-        compactness=params.compactness, bias=params.envelope_bias, clearance=params.edge_clearance,
-        seed=params.seed, contact=args.contact, swap=args.swap, axis=axis, shift=shift)
+        Grid(params.box, params.apix, args.device or default_device()), volume=params.volume,
+        alpha=rough["alpha"], roughness_amplitude=rough["roughness_amplitude"], compactness=params.compactness,
+        bias=params.envelope_bias, clearance=params.edge_clearance, seed=params.seed,
+        **_symmetry_kw(args, params.seed))
     name = args.name or f"{args.symmetry.lower()}_{params.seed:06d}"
     d = save(env, args.out, name, params.apix, {**dataclasses.asdict(params), **rough, "contact": args.contact,
                                                 "swap": args.swap, "axis": args.axis, "shift_xyz": args.shift})
@@ -201,7 +191,9 @@ def cmd_gas(args) -> None:
     from .ladder import gas
     from .model import write
 
-    m = gas(params_from_args(args), frame_box=args.frame_box, device=args.device or default_device())
+    params = params_from_args(args)
+    m = gas(params, frame_box=args.frame_box, device=args.device or default_device(),
+            **_symmetry_kw(args, params.seed))
     write(args.out, m, overwrite=args.overwrite)
     print(f"wrote {args.out}: {m.describe().splitlines()[0]}")
 
@@ -260,6 +252,17 @@ def cmd_render(args) -> None:
     print(f"wrote {args.out}: truth, half1, half2, full, support ({meta['box_voxels']}^3 at {args.apix} A/px)")
 
 
+def cmd_expand(args) -> None:
+    from .model import expand, write
+
+    m = _read(args)
+    if not m.symmetry:
+        sys.exit(f"{args.input} has no symmetry to expand")
+    full = expand(m)
+    write(args.out, full, overwrite=args.overwrite)
+    print(f"wrote {args.out}: {m.symmetry['group']}, {len(m.symmetry['ops'])} copies, {full.n} atoms")
+
+
 def cmd_info(args) -> None:
     print(f"{args.input}: {_read(args).describe()}")
 
@@ -286,7 +289,7 @@ def cmd_ladder(args) -> None:
         print(f"wrote {path}", flush=True)
         return m
 
-    m1 = save(ladder.gas(params, frame_box=args.frame_box, device=device))
+    m1 = save(ladder.gas(params, frame_box=args.frame_box, device=device, **_symmetry_kw(args, params.seed)))
     save(*ladder.hardcore(m1, steps=args.steps, **kw))
     m = m1
     steps = [(2, lambda m: ladder.build_polymer(m, steps=args.steps, **kw)),
@@ -297,6 +300,30 @@ def cmd_ladder(args) -> None:
         if rung > args.to:
             break
         m = save(*step(m))
+
+
+def _symmetry_args(p) -> None:
+    g = p.add_argument_group("symmetry (docs/SYMMETRY.md)")
+    g.add_argument("--symmetry", default="C1", help="point group: Cn for now (C1 = none); the model is one "
+                                                      "asymmetric unit and --mass-kda the whole assembly's")
+    g.add_argument("--contact", type=float, default=0.6, help="overlap of neighbouring subunit bowls (radii)")
+    g.add_argument("--swap", type=float, default=0.0, help="domain swap strength 0-1")
+    g.add_argument("--axis", default="z", help="symmetry axis: z, random, or x,y,z")
+    g.add_argument("--shift", type=float, nargs=3, metavar=("X", "Y", "Z"), help="axis offset from the centre (A)")
+
+
+def _symmetry_kw(args, seed: int) -> dict:
+    import numpy as np
+
+    if args.axis == "z":
+        axis = np.array([1.0, 0, 0])
+    elif args.axis == "random":
+        v = np.random.default_rng(seed).normal(size=3)
+        axis = v / np.linalg.norm(v)
+    else:
+        axis = np.array([float(x) for x in args.axis.split(",")])[::-1]          # given as x,y,z
+    shift = np.array(args.shift[::-1], dtype=float) if args.shift else None    # given as x y z (A)
+    return {"symmetry": args.symmetry, "contact": args.contact, "swap": args.swap, "axis": axis, "shift": shift}
 
 
 def _model_args(p, steps: bool = True) -> None:
@@ -341,14 +368,7 @@ def main(argv=None) -> None:
                                    "--mass-kda is the whole assembly's mass.")
     p.add_argument("--out", required=True)
     p.add_argument("--name")
-    p.add_argument("--symmetry", default="C1", help="point group: Cn for now (C1 = no symmetry)")
-    p.add_argument("--contact", type=float, default=0.6,
-                   help="overlap of neighbouring subunit bowls, in subunit radii (deeper = larger interfaces)")
-    p.add_argument("--swap", type=float, default=0.0,
-                   help="domain swap strength 0-1: each subunit sends an arm into its neighbour")
-    p.add_argument("--axis", default="z", help="symmetry axis: z, random, or x,y,z")
-    p.add_argument("--shift", type=float, nargs=3, metavar=("X", "Y", "Z"),
-                   help="move the axis this far (A) from the box centre")
+    _symmetry_args(p)
     p.add_argument("--device")
     add_param_args(p)
     p.set_defaults(func=cmd_envelope)
@@ -370,6 +390,7 @@ def main(argv=None) -> None:
     p.add_argument("--frame-box", type=float, help="centre in a frame of this edge (A), e.g. 144")
     p.add_argument("--overwrite", action="store_true")
     p.add_argument("--device")
+    _symmetry_args(p)
     add_param_args(p)
     p.set_defaults(func=cmd_gas)
 
@@ -416,6 +437,12 @@ def main(argv=None) -> None:
     p.add_argument("--device")
     p.set_defaults(func=cmd_render)
 
+    p = sub.add_parser("expand", help="symmetric model -> the whole assembly (one chain per copy)")
+    p.add_argument("input")
+    p.add_argument("-o", "--out", required=True)
+    p.add_argument("--overwrite", action="store_true")
+    p.set_defaults(func=cmd_expand)
+
     p = sub.add_parser("info", help="rung and history of a model")
     p.add_argument("input")
     p.set_defaults(func=cmd_info)
@@ -427,6 +454,7 @@ def main(argv=None) -> None:
     p.add_argument("--steps", type=int, default=3000)
     p.add_argument("--overwrite", action="store_true")
     p.add_argument("--device")
+    _symmetry_args(p)
     add_param_args(p)
     p.set_defaults(func=cmd_ladder)
 

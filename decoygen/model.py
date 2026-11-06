@@ -15,6 +15,14 @@ model file says which rung it is:
 A step refuses a model that is not exactly the rung it builds on (`require`), so a rung is
 never skipped or applied twice by accident; `--force` overrides and is recorded in the history.
 Mirroring is the last thing done to a model: no step builds on a mirrored one.
+
+A symmetric model holds one asymmetric unit plus its symmetry operators:
+
+    REMARK 999 DECOYGEN SYMMETRY C3 CENTRE 72.000 72.000 72.000
+    REMARK 999 DECOYGEN SYMOP 2 r11 r12 r13 r21 ... r33        (x, y, z; about CENTRE)
+    REMARK 350   BIOMT1   2 ...                                 (standard; ChimeraX: sym #1 assembly 1)
+
+Steps relax the unit against its images (polymer.Envelope); `expand` gives the full assembly.
 """
 
 from __future__ import annotations
@@ -61,6 +69,7 @@ class Model:
     names: list[str] | None = None      # atom names; None: element symbol
     resnames: list[str] | None = None   # per atom; None: UNK
     bfactor: np.ndarray | None = None   # (N,); None: position along the chain, 0-100
+    symmetry: dict | None = None        # {"group": "C3", "centre": (3,) [z,y,x] A, "ops": (n,3,3) [z,y,x]}
 
     @property
     def n(self) -> int:
@@ -73,7 +82,9 @@ class Model:
 
     def describe(self) -> str:
         r = "not a decoygen model" if self.rung is None else f"rung {self.rung} ({RUNGS[self.rung]})"
-        lines = [(f"{r}{', mirrored' if self.mirrored else ''}; {self.n} atoms, {len(self.edges)} bonds, "
+        sym = (f", {self.symmetry['group']} ({len(self.symmetry['ops'])} copies of this unit)"
+               if self.symmetry else "")
+        lines = [(f"{r}{', mirrored' if self.mirrored else ''}{sym}; {self.n} atoms, {len(self.edges)} bonds, "
                   f"{self.box:g} A frame")]
         lines += [f"  step {k + 1}: {h}" for k, h in enumerate(self.history)]
         return "\n".join(lines)
@@ -99,6 +110,30 @@ def require(model: Model, rung: int, step: str, force: bool = False) -> None:
                         f"(or pass --force).")
     raise RungError(f"{step} makes rung {rung + 1} from {want}, but this model is already {have}. "
                     f"Pass --force to do it anyway.")
+
+
+def expand(m: Model) -> Model:
+    """The full assembly of a symmetric model: every copy of the unit, one chain per copy."""
+    if not m.symmetry:
+        return m
+    ops, c = np.asarray(m.symmetry["ops"]), np.asarray(m.symmetry["centre"])
+    k = len(ops)
+    resseq = m.resseq if m.resseq is not None else np.arange(1, m.n + 1)
+    if resseq.max() > 9999:
+        raise ValueError("expand: more than 9999 residues per copy")
+    out = dataclasses.replace(
+        m, pos=np.concatenate([c + (m.pos - c) @ g.T for g in ops]), els=np.tile(m.els, k),
+        edges=np.concatenate([m.edges + i * m.n for i in range(k)]),
+        resseq=np.concatenate([resseq + i * 9999 for i in range(k)]),               # chain A, B, C, ...
+        names=None if m.names is None else m.names * k, resnames=None if m.resnames is None else m.resnames * k,
+        bfactor=None if m.bfactor is None else np.tile(m.bfactor, k), symmetry=None,
+        history=[*m.history, f"expand {m.symmetry['group']}"])
+    return out
+
+
+def _xyz(r: np.ndarray) -> np.ndarray:
+    """A rotation in [z, y, x] as one in [x, y, z] (and back: the same permutation)."""
+    return r[::-1, ::-1]
 
 
 def default_path(src: Path, rung: int, mirrored: bool = False) -> Path:
@@ -130,6 +165,16 @@ def write(path: str | Path, m: Model, overwrite: bool = False) -> Path:
         lines.append(f"{TAG}RUNG {m.rung} {RUNGS[m.rung]}")
     lines += [f"{TAG}MIRRORED {'yes' if m.mirrored else 'no'}", f"{TAG}VERSION {__version__}"]
     lines += [f"{TAG}STEP {k + 1} {h}" for k, h in enumerate(m.history)]
+    if m.symmetry:
+        ops, c = np.asarray(m.symmetry["ops"]), np.asarray(m.symmetry["centre"])[::-1]
+        lines.append(f"{TAG}SYMMETRY {m.symmetry['group']} CENTRE {c[0]:.4f} {c[1]:.4f} {c[2]:.4f}")
+        lines += [f"{TAG}SYMOP {k + 1} " + " ".join(f"{v:.9f}" for v in _xyz(g).ravel()) for k, g in enumerate(ops)]
+        lines += ["REMARK 350 BIOMOLECULE: 1", "REMARK 350 APPLY THE FOLLOWING TO CHAINS: A"]
+        for k, g in enumerate(ops):
+            r = _xyz(g)
+            t = c - r @ c                                                    # x' = r x + t
+            lines += [f"REMARK 350   BIOMT{i + 1} {k + 1:3d}{r[i, 0]:10.6f}{r[i, 1]:10.6f}{r[i, 2]:10.6f}"
+                      f"{t[i]:15.5f}" for i in range(3)]
     lines.append(f"CRYST1{m.box:9.3f}{m.box:9.3f}{m.box:9.3f}  90.00  90.00  90.00 P 1           1")
     xyz = m.pos[:, ::-1]
     record = "ATOM  " if m.resnames else "HETATM"
@@ -158,6 +203,7 @@ def read(path: str | Path) -> Model:
     pos, els, serial, edges = [], [], {}, set()
     resseq, names, resnames, bfac, chains = [], [], [], [], {}
     rung, mirrored, history, box = None, False, [], None
+    sym_group, sym_centre, sym_ops = None, None, []
     for line in Path(path).read_text().splitlines():
         if line.startswith(TAG):
             key, _, rest = line[len(TAG):].partition(" ")
@@ -167,6 +213,11 @@ def read(path: str | Path) -> Model:
                 mirrored = rest.strip() == "yes"
             elif key == "STEP":
                 history.append(rest.split(" ", 1)[1] if " " in rest else "")
+            elif key == "SYMMETRY":
+                f = rest.split()
+                sym_group, sym_centre = f[0], np.array([float(v) for v in f[2:5]])[::-1]
+            elif key == "SYMOP":
+                sym_ops.append(_xyz(np.array([float(v) for v in rest.split()[1:10]]).reshape(3, 3)))
         elif line.startswith("CRYST1"):
             box = float(line[6:15])
         elif line.startswith(("ATOM", "HETATM")):
@@ -193,7 +244,9 @@ def read(path: str | Path) -> Model:
     return Model(pos=pos, els=np.array(els, dtype=np.int64),
                  edges=np.array(sorted(edges), dtype=np.int64).reshape(-1, 2), box=box, rung=rung,
                  mirrored=mirrored, history=history, resseq=np.array(resseq, dtype=np.int64), names=names,
-                 resnames=resnames if any(r != "UNK" for r in resnames) else None, bfactor=np.array(bfac))
+                 resnames=resnames if any(r != "UNK" for r in resnames) else None, bfactor=np.array(bfac),
+                 symmetry=({"group": sym_group, "centre": sym_centre, "ops": np.array(sym_ops)}
+                           if sym_group else None))
 
 
 # ---------------------------------------------------------------- confinement

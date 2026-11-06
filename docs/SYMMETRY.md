@@ -1,7 +1,8 @@
 # Symmetric assemblies (Cn): design note
 
 Status: 3-D Cn envelope and subdivision implemented (`decoygen envelope --symmetry Cn`, `decoygen/symmetry.py`,
-`tests/test_symmetry.py`); atoms not yet. 2-D toy below. Started 2026-11-06.
+`tests/test_symmetry.py`). The atom ladder builds symmetric assemblies (`decoygen ladder --symmetry Cn`):
+one asymmetric unit relaxed against its images at every rung. 2-D toy below. Started 2026-11-06.
 
 ## Why
 
@@ -122,6 +123,29 @@ pore only when 2 sin(π/n) < 2 − contact (n ≳ 5 at contact 0.6). Hollowness 
   (see TODO).
 
 ## Atoms: build symmetrically along the way, not symmetrise at the end
+
+**Implemented (2026-11-06):**
+- **Envelope and relaxation.** `polymer.Envelope` carries the operators, and `polymer.relax` then adds
+  `ImageSterics`: unit-vs-image steric lower bounds, with the images computed from the unit on every step,
+  so gradients reach both sides of each interface.
+  - Atoms are confined to the whole assembly's envelope, not a fixed subunit region, so interfaces can move.
+  - No step needed further plumbing: hard-core, polymer, thread, peptide and the side-chain thinning passes
+    all relax through it.
+- **Gas** draws the unit's share of the atoms in subunit 1's region.
+- **Model files** carry `SYMMETRY`/`SYMOP` header lines and standard `REMARK 350 BIOMT` records.
+- **`mirror`** reflects the operators as well. **`render`** and `decoygen expand` build the assembly, one
+  chain per copy.
+- **Test (C3, 100 kDa):**
+  - C3 has 302 residues per unit and C7 has 130.
+  - No image clashes at any relaxed rung.
+  - The closest approach between atoms of different copies is at the same steric floor (2.2–2.6 Å) as
+    within a unit.
+- **Not yet:**
+  - Side-chain placement scores clashes only within the unit (the final relaxation then resolves contacts
+    with the images).
+  - Half-map noise is not symmetrised.
+
+**Original plan:**
 
 A tight interface cannot be made by building one asymmetric unit (ASU) through the whole ladder and copying it
 at the end. The copies would clash or leave a gap. Each side of an interface has to relax against the other at
