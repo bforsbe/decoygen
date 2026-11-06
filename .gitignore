@@ -9,3 +9,4 @@ logs/
 # downloaded PDB entries (experiments/fetch_pdb.sh)
 experiments/*/data/*.cif
 experiments/*/reference/*.cif
+paper/

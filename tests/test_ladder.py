@@ -20,9 +20,9 @@ def pieces(m: Model) -> int:
 def rungs():
     m1 = ladder.gas(DecoyParams(seed=3, **SMALL))
     m2, _ = ladder.build_polymer(m1, steps=300)
-    m3, _ = ladder.thread_chain(m2, relax=300)
+    m3, info3 = ladder.thread_chain(m2, relax=300)
     m4, info4 = ladder.make_peptide(m3, steps=2000)
-    return m1, m2, m3, m4, info4
+    return m1, m2, m3, m4, info4, info3
 
 
 @pytest.fixture(scope="module")
@@ -51,7 +51,7 @@ def test_require_refuses_skipped_repeated_mirrored_and_foreign_models():
 
 
 def test_rungs_and_history(rungs):
-    m1, m2, m3, m4, _ = rungs
+    m1, m2, m3, m4, _, _ = rungs
     assert [m.rung for m in rungs[:4]] == [1, 2, 3, 4]
     assert [h.split()[0] for h in m4.history] == ["gas", "polymer", "thread", "peptide"]
     assert len(m1.edges) == 0 and len(m2.edges) > 0.9 * m2.n
@@ -68,7 +68,7 @@ def test_model_file_round_trip(rungs, tmp_path):
 
 
 def test_peptide_is_trans_planar_and_L(rungs):
-    _, _, m3, m4, info = rungs
+    _, _, m3, m4, info, _ = rungs
     assert m4.n == m3.n                                               # carbonyl O paid for by side atoms
     assert info["L_fraction"] == 1.0
     assert info["omega_trans_fraction_gt150"] > 0.97
@@ -122,3 +122,9 @@ def test_library_and_placement_reproduce_real_side_chains():
     assert abs(np.linalg.norm(phe[names.index("CB")] - ca) - 1.53) < 0.05
     ring = phe[[names.index(x) for x in ("CG", "CD1", "CD2", "CE1", "CE2", "CZ")]]
     assert np.linalg.svd(ring - ring.mean(0))[1][-1] < 0.1               # planar ring
+
+
+def test_thread_pays_for_its_bridge_atoms(rungs):
+    m2, m3, info3 = rungs[1], rungs[2], rungs[5]
+    assert info3["added"] > 0 and info3["removed_for_bridges"] == info3["added"]
+    assert m3.n == m2.n - info3["pruned"]                             # no net mass from the bridges

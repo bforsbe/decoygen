@@ -1,6 +1,7 @@
 """Command line.
 
 Decoy maps (v0):   decoygen generate | batch | calibrate
+Envelopes:         decoygen envelope (optionally symmetric: --symmetry C3, divided into subunits)
 Atom-model ladder: decoygen gas | hardcore | polymer | thread | peptide | sidechains | mirror | render |
                    info | ladder
                    (each model step makes the next rung of the protein-likeness ladder from the one
@@ -78,6 +79,39 @@ def cmd_generate(args) -> None:
     d = save(decoy, args.out, name=args.name, plots=args.plots, extra_maps=args.extra_maps)
     print(f"wrote {d}")
     print(json.dumps({k: v for k, v in decoy.diagnostics.items() if not isinstance(v, dict)}, indent=1))
+
+
+def cmd_envelope(args) -> None:
+    import numpy as np
+
+    from .fourier import Grid
+    from .roughness import roughness_parameters
+    from .symmetry import make_symmetric_envelope, save
+
+    params = params_from_args(args)
+    rough = roughness_parameters(params.roughness_D, params.alpha, params.roughness_amplitude)
+    if args.axis == "z":
+        axis = np.array([1.0, 0, 0])
+    elif args.axis == "random":
+        v = np.random.default_rng(params.seed).normal(size=3)
+        axis = v / np.linalg.norm(v)
+    else:
+        axis = np.array([float(x) for x in args.axis.split(",")])[::-1]          # given as x,y,z
+    shift = np.array(args.shift[::-1], dtype=float) if args.shift else None    # given as x y z (A)
+    env = make_symmetric_envelope(
+        Grid(params.box, params.apix, args.device or default_device()), symmetry=args.symmetry,
+        volume=params.volume, alpha=rough["alpha"], roughness_amplitude=rough["roughness_amplitude"],
+        compactness=params.compactness, bias=params.envelope_bias, clearance=params.edge_clearance,
+        seed=params.seed, contact=args.contact, swap=args.swap, axis=axis, shift=shift)
+    name = args.name or f"{args.symmetry.lower()}_{params.seed:06d}"
+    d = save(env, args.out, name, params.apix, {**dataclasses.asdict(params), **rough, "contact": args.contact,
+                                                "swap": args.swap, "axis": args.axis, "shift_xyz": args.shift})
+    i = env.info
+    print(f"wrote {d}/{name}_*  (ChimeraX: cd {d}; open {name}.cxc)")
+    print(f"{i['symmetry']}: {i['volume_A3']:.0f} A^3 (target {i['target_volume_A3']:.0f}); subunits "
+          f"{', '.join(f'{v:.0f}' for v in i['subunit_volumes_A3'])} A^3, pieces {i['subunit_pieces']}; "
+          f"interface {i['interface_A2_per_subunit']:.0f} A^2/subunit (voxel faces); "
+          f"symmetry mismatch {100 * i['symmetry_mismatch_fraction_max']:.2f} %")
 
 
 def _flat(prefix: str, d: dict) -> dict:
@@ -192,7 +226,7 @@ def cmd_thread(args) -> None:
     from .ladder import thread_chain
 
     m, info = thread_chain(_read(args), split=args.split or None, prune=args.prune, relax=args.relax,
-                           seed=args.seed, device=args.device or default_device(), force=args.force, log=_log)
+                           conserve=not args.no_conserve, seed=args.seed, device=args.device or default_device(), force=args.force, log=_log)
     _save(m, args, info)
 
 
@@ -300,6 +334,25 @@ def main(argv=None) -> None:
     add_param_args(p)
     p.set_defaults(func=cmd_batch)
 
+    p = sub.add_parser("envelope", help="envelope only, optionally symmetric and divided into subunits",
+                       description="Envelope (mask) only. With --symmetry, copies of one subunit field compete "
+                                   "for space: the assembly is their union, each voxel belongs to the strongest "
+                                   "copy, and interfaces form where copies meet (docs/SYMMETRY.md). "
+                                   "--mass-kda is the whole assembly's mass.")
+    p.add_argument("--out", required=True)
+    p.add_argument("--name")
+    p.add_argument("--symmetry", default="C1", help="point group: Cn for now (C1 = no symmetry)")
+    p.add_argument("--contact", type=float, default=0.6,
+                   help="overlap of neighbouring subunit bowls, in subunit radii (deeper = larger interfaces)")
+    p.add_argument("--swap", type=float, default=0.0,
+                   help="domain swap strength 0-1: each subunit sends an arm into its neighbour")
+    p.add_argument("--axis", default="z", help="symmetry axis: z, random, or x,y,z")
+    p.add_argument("--shift", type=float, nargs=3, metavar=("X", "Y", "Z"),
+                   help="move the axis this far (A) from the box centre")
+    p.add_argument("--device")
+    add_param_args(p)
+    p.set_defaults(func=cmd_envelope)
+
     p = sub.add_parser("calibrate", help="build the (alpha, amplitude) -> D lookup table")
     p.add_argument("--alpha-min", type=float, default=3.8)
     p.add_argument("--alpha-max", type=float, default=5.0)
@@ -333,6 +386,8 @@ def main(argv=None) -> None:
     p.add_argument("--split", type=int, default=5, help="cut the tree into longest paths of >= SPLIT atoms (0: off)")
     p.add_argument("--prune", type=int, default=4, help="max bonds from the backbone for side atoms")
     p.add_argument("--relax", type=int, default=3000, help="relaxation steps")
+    p.add_argument("--no-conserve", action="store_true",
+                   help="keep all atoms: bridges then add mass (~15 %%) to the envelope")
     p.set_defaults(func=cmd_thread)
 
     p = sub.add_parser("peptide", help="rung 3 -> rung 4: N-CA-C(=O) backbone, trans peptides, L-amino acids")

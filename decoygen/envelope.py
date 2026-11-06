@@ -111,6 +111,11 @@ def solid_object(mask: np.ndarray) -> np.ndarray:
     return ndimage.binary_fill_holes(periodic_centre(largest_component(mask)))
 
 
+def solid_in_place(mask: np.ndarray) -> np.ndarray:
+    """As solid_object, but not moved: for objects built around a fixed point (symmetry axes)."""
+    return ndimage.binary_fill_holes(largest_component(mask))
+
+
 def periodic_centre(mask: np.ndarray) -> np.ndarray:
     """Roll so the circular mean of the object lies at the box centre."""
     n = mask.shape[0]
@@ -132,14 +137,16 @@ def clearance_ok(mask: np.ndarray, clearance_px: int) -> bool:
     return not (mask & ~inner).any()
 
 
-def threshold_to_volume(field: np.ndarray, n_vox: int, tol: float = 0.005, max_iter: int = 30) -> np.ndarray:
-    """Largest component of {field > t} with volume ~ n_vox (bisection on t; monotone in t)."""
+def threshold_to_volume(field: np.ndarray, n_vox: int, tol: float = 0.005, max_iter: int = 30,
+                        solid=solid_object) -> np.ndarray:
+    """Largest component of {field > t} with volume ~ n_vox (bisection on t; monotone in t).
+    `solid` turns a superlevel set into the object (default: largest component, centred, filled)."""
     flat = np.sort(field.ravel())[::-1]
     lo, hi = n_vox, min(flat.size - 1, 4 * n_vox)   # ranks: top-`rank` voxels kept
     best = None
     for _ in range(max_iter):
         rank = (lo + hi) // 2
-        comp = solid_object(field > flat[rank])
+        comp = solid(field > flat[rank])
         v = int(comp.sum())
         if best is None or abs(v - n_vox) < abs(best[1] - n_vox):
             best = (comp, v)
@@ -152,7 +159,7 @@ def threshold_to_volume(field: np.ndarray, n_vox: int, tol: float = 0.005, max_i
     return best[0]
 
 
-def mbo_flow(grid: Grid, mask: np.ndarray, time: float, n_vox: int) -> np.ndarray:
+def mbo_flow(grid: Grid, mask: np.ndarray, time: float, n_vox: int, solid=solid_object) -> np.ndarray:
     """Merriman-Bence-Osher mean-curvature flow at constant volume for `time` A^2."""
     sigma = 2.0 * grid.apix
     step = sigma**2 / 2
@@ -161,7 +168,7 @@ def mbo_flow(grid: Grid, mask: np.ndarray, time: float, n_vox: int) -> np.ndarra
         phi = grid.gaussian_filter(torch.from_numpy(mask.astype(np.float32)).to(grid.device), sigma)
         phi = phi.cpu().numpy()
         t = np.partition(phi.ravel(), phi.size - n_vox)[phi.size - n_vox]
-        mask = solid_object(phi >= t)
+        mask = solid(phi >= t)
     return mask
 
 

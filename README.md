@@ -32,6 +32,20 @@ Each decoy directory holds the full map, two half-maps, the noise-free map, the
 envelope mask (all MRC, float32, origin 0) and a JSON file with all parameters,
 seeds, versions and diagnostics.
 
+## Symmetric envelopes
+
+```bash
+decoygen envelope --out run/sym --symmetry C3 --seed 0                 # C3 assembly, 100 kDa in total
+decoygen envelope --out run/sym --symmetry C7 --contact 0.5            # a ring with a pore
+decoygen envelope --out run/sym --symmetry C3 --swap 1.0               # domain swap
+decoygen envelope --out run/sym --symmetry C3 --axis random --shift 12 -8 5
+```
+
+Copies of one subunit field compete for space: the assembly is their union, each voxel belongs to the
+strongest copy, and interfaces form where copies meet. The output is the envelope, a subunit label map, one
+map per subunit, a JSON file with the symmetry operators and checks, and a ChimeraX script. Only Cn is
+parsed so far; the code takes any list of rotations. See [docs/SYMMETRY.md](docs/SYMMETRY.md).
+
 ## The protein-likeness ladder (atom models)
 
 Beyond the v0 maps, decoygen builds atom models that add protein knowledge one named
@@ -63,8 +77,10 @@ decoygen info    run/rung5_real_side_chains.pdb  # rung and full history
 decoygen ladder --to 5 --out run --frame-box 144 # all of the above (rungs 0-5) in one go
 ```
 
-The atom count, and so the map's mass, is kept from rung 3 on. The peptide step pays for
-each carbonyl O with a side atom. The side-chain step then thins the over-long backbone to a
+The atom count, and so the map's mass, is the same on every rung from 1 to 5. Threading pays for
+each bridging atom by removing the nearest side-branch leaf (`--no-conserve` keeps them all, which adds
+~17 % mass). The peptide step pays for each carbonyl O with a side atom; when the chain is too long for
+that, its most bent backbone atoms first leave the chain in place as side atoms. The side-chain step then thins the over-long backbone to a
 protein's ~7.8 atoms per residue in passes (at most 1 residue in 5 per pass, most bent first).
 Each excised residue's atoms stay in place as its neighbour's side group, and the new junction
 is switched on gradually during relaxation, so the volume never collapses. A random

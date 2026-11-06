@@ -15,7 +15,9 @@ are reflected through the N-CA-C plane where needed), and relaxation then holds:
 
 Phi and psi are left as they fall (random coil comes at a later rung). The new O atoms are
 paid for by trimming side-branch leaves, so the atom count (and map mass) stays that of the
-input unless keep_atoms=False.
+input unless keep_atoms=False. When the chain is too long for that (fewer side atoms than
+residues), its most bent backbone atoms are first bypassed: they leave the chain where they
+are, hanging off the previous backbone atom, until every residue's O can be paid for.
 """
 
 from __future__ import annotations
@@ -81,6 +83,31 @@ def _reflect(p: np.ndarray, a: np.ndarray, b: np.ndarray, c: np.ndarray) -> np.n
     return p - 2 * ((p - a) @ nrm)[:, None] * nrm
 
 
+def bypass(pos: np.ndarray, edges: np.ndarray, backbone: np.ndarray, n_side: int
+           ) -> tuple[np.ndarray, np.ndarray, int]:
+    """Shorten the backbone until its residues (len // 3) are no more than the side atoms that pay
+    for their O: bypass interior atoms, most bent first (shortest i-1 .. i+1 span), never two
+    neighbours. A bypassed atom keeps its bond to i-1 as a side atom; i-1 bonds to i+1."""
+    bb = np.asarray(backbone)
+    need = 0
+    while (len(bb) - need) // 3 > n_side + need:
+        need += 1
+    if need == 0:
+        return bb, edges, 0
+    span = np.linalg.norm(pos[bb[2:]] - pos[bb[:-2]], axis=1)
+    taken, n_taken = np.zeros(len(bb), dtype=bool), 0
+    for k in np.argsort(span, kind="stable") + 1:
+        if n_taken == need:
+            break
+        if not (taken[k - 1] or taken[k + 1]):
+            taken[k], n_taken = True, n_taken + 1
+    ks = np.flatnonzero(taken)
+    drop = {(min(bb[k], bb[k + 1]), max(bb[k], bb[k + 1])) for k in ks}
+    keep = [(int(i), int(j)) for i, j in edges if (min(i, j), max(i, j)) not in drop]
+    keep += [(int(min(bb[k - 1], bb[k + 1])), int(max(bb[k - 1], bb[k + 1]))) for k in ks]
+    return bb[~taken], np.array(keep, dtype=np.int64).reshape(-1, 2), int(taken.sum())
+
+
 def build(pos: np.ndarray, els: np.ndarray, edges: np.ndarray, backbone: np.ndarray, *,
           keep_atoms: bool = True, seed: int = 0) -> dict:
     """Topology and starting positions of the peptide. `backbone`: backbone atom indices in chain order.
@@ -89,6 +116,9 @@ def build(pos: np.ndarray, els: np.ndarray, edges: np.ndarray, backbone: np.ndar
     n/ca/c/o (per residue) and cb (per residue, -1 for glycine), plus stats.
     """
     rng = np.random.default_rng(seed)
+    n_bypassed = 0
+    if keep_atoms:
+        backbone, edges, n_bypassed = bypass(pos, edges, backbone, len(pos) - len(backbone))
     n_res = len(backbone) // 3
     bb = np.asarray(backbone[:3 * n_res]).reshape(n_res, 3)          # N, CA, C per residue
     n_at = len(pos)
@@ -258,7 +288,7 @@ def build(pos: np.ndarray, els: np.ndarray, edges: np.ndarray, backbone: np.ndar
     stats = {"residues": n_res, "glycine": int((cb_new < 0).sum()), "atoms_in": n_at, "atoms_out": len(out_pos),
              "carbonyl_O_added": n_res, "side_leaves_trimmed": trimmed,
              "side_atoms_detached": detached + dropped_unreached,
-             "backbone_atoms_unused": int(len(backbone) - 3 * n_res),
+             "backbone_atoms_unused": int(len(backbone) - 3 * n_res), "backbone_atoms_bypassed": n_bypassed,
              "side_atoms_relabelled_to_C": int(over.sum()),
              "side_atoms_per_residue": float(side_mask.sum() / n_res)}
     return {"pos": out_pos, "els": out_el, "edges": e, "resseq": resseq, "names": names, "resnames": resnames,

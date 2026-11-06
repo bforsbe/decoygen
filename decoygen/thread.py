@@ -10,6 +10,9 @@
    (nearest neighbour, then 2-opt with orientation flips).
 4. fill: each gap is bridged by new carbon atoms, as many as a zig-zag with protein bond and
    1-3 distances needs; prune: side-branch atoms more than `prune` bonds from the backbone go.
+5. conserve (with fill): every bridge atom is paid for by removing the side-branch leaf atom
+   nearest to it (carbon first), so the atom count and composition, i.e. the mass in the
+   envelope, are unchanged. Without it, the bridges add ~15 % more atoms to the same volume.
 Atoms pushed past their element's bond cap by the joins become carbon.
 """
 
@@ -165,7 +168,35 @@ class _View:
         return [j for j in self.adj[i] if self.alive[j]]
 
 
-def thread(pos, els, edges, *, prune: int | None, fill: bool, seed: int = 0):
+def _pay_for_bridges(pos, els, edges, keep, on_backbone, new_pos) -> int:
+    """Clear `keep` for one side-branch leaf per bridge atom: the leaf nearest that atom, carbon
+    if any carbon leaf is left. Leaves only, so the chain stays one molecule. Returns the count."""
+    deg = np.zeros(len(pos), dtype=np.int64)
+    nbr = [[] for _ in range(len(pos))]
+    for i, j in edges:
+        if keep[i] and keep[j]:
+            deg[i] += 1
+            deg[j] += 1
+            nbr[i].append(int(j))
+            nbr[j].append(int(i))
+    carbon = els == atoms.ELEMENTS.index("C")
+    removed = 0
+    for x in new_pos:
+        leaf = keep & ~on_backbone & (deg <= 1)
+        cand = np.flatnonzero(leaf & carbon)
+        if not len(cand):
+            cand = np.flatnonzero(leaf)
+        if not len(cand):
+            break
+        k = cand[np.argmin(((pos[cand] - x) ** 2).sum(1))]
+        keep[k] = False
+        for j in nbr[k]:
+            deg[j] -= 1
+        removed += 1
+    return removed
+
+
+def thread(pos, els, edges, *, prune: int | None, fill: bool, conserve: bool = True, seed: int = 0):
     """Returns (pos, els, edges, resseq, backbone, links, stats): atoms renumbered, the residue
     number of each atom along the chain, which atoms form the backbone, and the remaining gaps
     (atom pairs) when not filled."""
@@ -204,6 +235,8 @@ def thread(pos, els, edges, *, prune: int | None, fill: bool, seed: int = 0):
     on_backbone = np.zeros(n, dtype=bool)
     for p in paths:
         on_backbone[p] = True
+    removed = _pay_for_bridges(pos, els, edges, keep, on_backbone, [x for x, _ in new_pos]) if (
+        conserve and fill) else 0
 
     # renumber: kept old atoms, then the new ones
     index = np.full(n + len(new_pos), -1)
@@ -221,6 +254,7 @@ def thread(pos, els, edges, *, prune: int | None, fill: bool, seed: int = 0):
     deg = np.bincount(all_edges.ravel(), minlength=len(pos_out))
     over = deg > polymer.element_caps(els_out)
     els_out[over] = atoms.ELEMENTS.index("C")
-    stats = {"atoms_in": n, "fragments": n_frag, "pruned": int(n - keep.sum()), "added": len(new_pos),
+    stats = {"atoms_in": n, "fragments": n_frag, "pruned": int(n - keep.sum()) - removed, "added": len(new_pos),
+             "removed_for_bridges": removed, "atoms_out": len(pos_out),
              "relabelled_to_C": int(over.sum()), "residues": residue}
     return pos_out, els_out, all_edges, res_out, bb_out, links, stats

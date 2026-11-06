@@ -94,11 +94,12 @@ def build_polymer(m: Model, *, steps: int = 3000, seed: int = 0, device: str = "
     return out, info
 
 
-def thread_chain(m: Model, *, split: int | None = 5, prune: int | None = 4, relax: int = 3000, seed: int = 0,
+def thread_chain(m: Model, *, split: int | None = 5, prune: int | None = 4, relax: int = 3000,
+                 conserve: bool = True, seed: int = 0,
                  device: str = "cpu", force=False, log=None):
     require(m, 2, "thread", force)
     pos, els, edges, resseq, backbone, _, stats = thread.thread(m.pos, m.els, (
-        thread.decompose(m.n, m.edges, split) if split else m.edges), prune=prune, fill=True, seed=seed)
+        thread.decompose(m.n, m.edges, split) if split else m.edges), prune=prune, fill=True, conserve=conserve, seed=seed)
     info = dict(stats)
     if relax:
         x, rinfo = polymer.relax(torch.as_tensor(pos, dtype=torch.float32, device=device), els, edges,
@@ -115,7 +116,7 @@ def thread_chain(m: Model, *, split: int | None = 5, prune: int | None = 4, rela
         else:
             count[resseq[i]] = count.get(resseq[i], 0) + 1
             names.append(f"{el}{count[resseq[i]]}"[:4])
-    out = m.then(3, "thread", split=split, prune=prune, relax=relax, seed=seed, **({"forced": True} if force else {}))
+    out = m.then(3, "thread", split=split, prune=prune, relax=relax, conserve=conserve, seed=seed, **({"forced": True} if force else {}))
     out.pos, out.els, out.edges, out.resseq, out.names = pos, els, edges, resseq, names
     out.resnames = out.bfactor = None
     return out, info

@@ -667,6 +667,7 @@ optimizations if throughput matters.
   masses, compactness or bias values shift D (§6).
 * Junction density and a protein-likeness critic are not implemented (milestones 3–4).
 * Hydrogens are not rendered.
+* Symmetric assemblies (Cn first) are in design: see [SYMMETRY.md](SYMMETRY.md), with a 2-D toy figure.
 
 ## 17. Parameter reference
 
