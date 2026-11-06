@@ -53,7 +53,7 @@ def _tensor(m: Model, device) -> torch.Tensor:
 
 def gas(params: DecoyParams, *, frame_box: float | None = None, device: str = "cpu", symmetry: str | None = None,
         contact: float = 0.6, swap: float = 0.0, axis: np.ndarray | None = None,
-        shift: np.ndarray | None = None) -> Model:
+        shift: np.ndarray | None = None, owner_fine: float = 0.3, owner_sigma: float = 1.5) -> Model:
     """The default pipeline's envelope and atom gas (pipeline.generate up to sample_gas), centred
     in a frame_box A frame (default: the decoy's own box).
 
@@ -71,7 +71,7 @@ def gas(params: DecoyParams, *, frame_box: float | None = None, device: str = "c
             g, symmetry=symmetry, volume=params.volume, alpha=rough["alpha"],
             roughness_amplitude=rough["roughness_amplitude"], compactness=params.compactness,
             bias=params.envelope_bias, clearance=params.edge_clearance, seed=params.seed, contact=contact,
-            swap=swap, axis=axis, shift=shift)
+            swap=swap, axis=axis, shift=shift, owner_fine=owner_fine, owner_sigma=owner_sigma)
         mask, region, sym = env.mask, env.labels == 1, env
     else:
         mask, _ = make_envelope(
@@ -96,7 +96,8 @@ def gas(params: DecoyParams, *, frame_box: float | None = None, device: str = "c
     changed = {f.name: getattr(params, f.name) for f in dataclasses.fields(params)
                if f.name != "seed" and getattr(params, f.name) != getattr(defaults, f.name)}
     if sym is not None:
-        changed.update(symmetry=sym.info["symmetry"], contact=contact, swap=swap,
+        changed.update(symmetry=sym.info["symmetry"], contact=contact, swap=swap, owner_fine=owner_fine,
+                       owner_sigma=owner_sigma,
                        axis=",".join(f"{v:.4f}" for v in sym.info["axis_zyx"][::-1]))
     off = (frame - own) / 2
     out = Model(pos=pos.cpu().numpy().astype(np.float64) + off, els=el.cpu().numpy(),

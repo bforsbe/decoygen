@@ -18,7 +18,12 @@ BOOK = Path("runs/bookmarks/raw-polymer")
 HALL = Path("runs/hallucination")
 CLI = ROOT / "build/cli"          # decoygen ladder --to 4 --out runs/ladder/build/cli --frame-box 144
 LADDER_CMD = "decoygen ladder --to 4 --out runs/ladder/build/cli --frame-box 144 --seed 0"
-CONTACT = {"C3": 0.6, "C7": 0.5}                                  # C7 at 0.5: a ring with a pore
+SYM_FLAGS = {                                                       # tag -> decoygen ladder flags
+    "C3": "--symmetry C3 --contact 0.6",
+    "C7": "--symmetry C7 --contact 0.5",                           # C7 at 0.5: a ring with a pore
+    # stress test: small, as rough as the calibration allows, little smoothing, rough interfaces
+    "C5r": "--symmetry C5 --contact 0.5 --mass-kda 40 --roughness-D 2.6 --compactness 2 --owner-fine 1.5",
+}
 
 
 def SYM(sym: str) -> Path:                                         # expanded assemblies (decoygen expand)
@@ -26,7 +31,7 @@ def SYM(sym: str) -> Path:                                         # expanded as
 
 
 def SYM_CMD(sym: str) -> str:
-    return (f"decoygen ladder --to 5 --symmetry {sym} --contact {CONTACT[sym]} --frame-box 144 --seed 0 "
+    return (f"decoygen ladder --to 5 {SYM_FLAGS[sym]} --frame-box 144 --seed 0 "
             f"--out runs/ladder/build/sym_{sym.lower()}; decoygen expand")
 
 
@@ -79,7 +84,7 @@ RUNGS = [
          BOOK / "protein_atoms.pdb", "6CVM chain A mirrored through x = 72 A", mirror=True,
          deh="protein_mirror", det="protein_mirror"),
 
-    *[r for sym in ("C3", "C7") for r in (
+    *[r for sym in SYM_FLAGS for r in (
         Rung(f"{sym}.1_gas", f"{sym} atom gas", f"rung 1 as a {sym} assembly (one unit + operators)",
              SYM(sym) / "rung1_atom_gas.pdb", SYM_CMD(sym), group="sym"),
         Rung(f"{sym}.2_raw_polymer", f"{sym} raw polymer", "rung 2, relaxed against its symmetry images",

@@ -64,3 +64,9 @@ def test_copies_that_do_not_touch_are_an_error(grid):
 def test_swap_needs_a_partner(grid):
     with pytest.raises(ValueError, match="partner"):
         build(grid, "C1", swap=1.0)
+
+
+def test_owner_fine_roughens_interfaces_but_keeps_subunits_whole(grid):
+    smooth, rough = build(grid, "C3"), build(grid, "C3", owner_fine=1.5)
+    assert rough.info["subunit_pieces"] == [1, 1, 1]
+    assert rough.info["interface_A2_per_subunit"] > 1.1 * smooth.info["interface_A2_per_subunit"]

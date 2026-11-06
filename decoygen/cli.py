@@ -95,7 +95,8 @@ def cmd_envelope(args) -> None:
         **_symmetry_kw(args, params.seed))
     name = args.name or f"{args.symmetry.lower()}_{params.seed:06d}"
     d = save(env, args.out, name, params.apix, {**dataclasses.asdict(params), **rough, "contact": args.contact,
-                                                "swap": args.swap, "axis": args.axis, "shift_xyz": args.shift})
+                                                "swap": args.swap, "axis": args.axis, "shift_xyz": args.shift,
+                                                "owner_fine": args.owner_fine, "owner_sigma": args.owner_sigma})
     i = env.info
     print(f"wrote {d}/{name}_*  (ChimeraX: cd {d}; open {name}.cxc)")
     print(f"{i['symmetry']}: {i['volume_A3']:.0f} A^3 (target {i['target_volume_A3']:.0f}); subunits "
@@ -310,6 +311,9 @@ def _symmetry_args(p) -> None:
     g.add_argument("--swap", type=float, default=0.0, help="domain swap strength 0-1")
     g.add_argument("--axis", default="z", help="symmetry axis: z, random, or x,y,z")
     g.add_argument("--shift", type=float, nargs=3, metavar=("X", "Y", "Z"), help="axis offset from the centre (A)")
+    g.add_argument("--owner-fine", type=float, default=0.3,
+                   help="weight of the fine (rough) field in subunit ownership; higher = rougher interfaces")
+    g.add_argument("--owner-sigma", type=float, default=1.5, help="ownership smoothing (voxels)")
 
 
 def _symmetry_kw(args, seed: int) -> dict:
@@ -323,7 +327,8 @@ def _symmetry_kw(args, seed: int) -> dict:
     else:
         axis = np.array([float(x) for x in args.axis.split(",")])[::-1]          # given as x,y,z
     shift = np.array(args.shift[::-1], dtype=float) if args.shift else None    # given as x y z (A)
-    return {"symmetry": args.symmetry, "contact": args.contact, "swap": args.swap, "axis": axis, "shift": shift}
+    return {"symmetry": args.symmetry, "contact": args.contact, "swap": args.swap, "axis": axis, "shift": shift,
+            "owner_fine": args.owner_fine, "owner_sigma": args.owner_sigma}
 
 
 def _model_args(p, steps: bool = True) -> None:

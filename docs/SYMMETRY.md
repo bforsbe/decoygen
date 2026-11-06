@@ -78,6 +78,9 @@ A disconnected assembly (copies that do not touch) is an error, not silently tri
   - **Why near the axis.** Every copy's bowl takes the same value on the axis, so the bowl's gradient across
     an interface vanishes there. Interface position then shifts by roughly (noise amplitude) / (bowl gradient),
     so the fine roughness alone decides ownership.
+  - **Exposed as `--owner-fine` (and `--owner-sigma`)** on `envelope` and `ladder`. At C5, 40 kDa,
+    `roughness_D` 2.6 and compactness 2, interface area per subunit was 1196, 1508 and 1782 A^2 (voxel faces)
+    for w = 0.3, 0.8 and 1.5; each subunit stayed one piece and volumes stayed within 2 %.
   - **Why 3-D is worse than 2-D.** In 2-D these ties happen at one point. In 3-D they run along the whole
     axis, through the assembly's thickness, and each interface is a surface with more room to fold.
   - **Effect.** w = 0.3 cut the interface area per subunit by 34 % (C3) and 32 % (C5). w = 0 gains only
@@ -140,6 +143,10 @@ pore only when 2 sin(π/n) < 2 − contact (n ≳ 5 at contact 0.6). Hollowness 
   - No image clashes at any relaxed rung.
   - The closest approach between atoms of different copies is at the same steric floor (2.2–2.6 Å) as
     within a unit.
+- **Stress test (C5r):** C5, 40 kDa, `roughness_D` 2.6, compactness 2, `owner_fine` 1.5
+  (`runs/ladder/build/build_sym_rough.sh`).
+  - 73 residues per unit and no image clashes at any rung.
+  - ModelAngelo N50 is 2–3 on every rung, as for C3 and C7; it builds 570–920 residues on the 365 present.
 - **Not yet:**
   - Side-chain placement scores clashes only within the unit (the final relaxation then resolves contacts
     with the images).

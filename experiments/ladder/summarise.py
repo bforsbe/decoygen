@@ -16,6 +16,7 @@ runs/ladder/README.md, summary.json, n50.png.
 from __future__ import annotations
 
 import json
+import re
 import sys
 import textwrap
 from pathlib import Path
@@ -146,7 +147,7 @@ def plot(results: dict, path: Path):
               ("branch", "Branch: optimised against the C-alpha CNN")]
     groups = [g for g in groups if any(r.group == g[0] and r.id in results for r in RUNGS)]
     widths = [max(3, sum(r.group == g and r.id in results for r in RUNGS)) for g, _ in groups]
-    fig, axes = plt.subplots(1, len(groups), figsize=(0.62 * sum(widths) + 2, 4.6),
+    fig, axes = plt.subplots(1, len(groups), figsize=(0.95 * sum(widths) + 2, 5.0),
                              gridspec_kw={"width_ratios": widths}, sharey=True)
     axes = np.atleast_1d(axes)
     for ax, (group, title) in zip(axes, groups):
@@ -167,7 +168,8 @@ def plot(results: dict, path: Path):
         ax.set_yscale("log")
         ax.set_ylim(1, 400)
         titles = {r.id: r.title for r in RUNGS}
-        ax.set_xticks(x, [i.split("_", 1)[0] + "\n" + textwrap.fill(titles[i], 14) for i in ids], fontsize=8.5,
+        labels = [i.split("_", 1)[0] + "\n" + textwrap.fill(re.sub(r"^C\d+r? ", "", titles[i]), 12) for i in ids]
+        ax.set_xticks(x, labels, fontsize=8.5,
                       color=analyse.INK)
         ax.set_title(title, loc="left", fontsize=12, color=analyse.INK)
     axes[0].set_ylabel("ModelAngelo chain N50 (residues)", color=analyse.INK2)

@@ -38,6 +38,7 @@ seeds, versions and diagnostics.
 decoygen envelope --out run/sym --symmetry C3 --seed 0                 # C3 assembly, 100 kDa in total
 decoygen envelope --out run/sym --symmetry C7 --contact 0.5            # a ring with a pore
 decoygen envelope --out run/sym --symmetry C3 --swap 1.0               # domain swap
+decoygen envelope --out run/sym --symmetry C5 --mass-kda 40 --roughness-D 2.6 --owner-fine 1.5  # rough interfaces
 decoygen envelope --out run/sym --symmetry C3 --axis random --shift 12 -8 5
 ```
 
